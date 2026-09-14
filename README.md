@@ -1504,8 +1504,8 @@ All configuration comes from `config.yaml` with environment variable overrides, 
 ## 31. Running Locally
 
 ```bash
-# Full local stack: Postgres, Valkey, Floci (SNS/SQS/S3), Redpanda (Kafka),
-# MailHog (SMTP), MockServer, OpenObserve (observability via otel-collector),
+# Full local stack: Postgres, Valkey, Floci (SNS/SQS/S3), MailHog (SMTP),
+# MockServer, OpenObserve (observability via otel-collector),
 # and the payment-service itself (built via the multi-stage Dockerfile)
 docker compose up --build
 
@@ -1557,13 +1557,13 @@ AWS_ENDPOINT_URL=http://localhost:4566 \
 AWS_REGION=us-east-1 \
   go run ./cmd/server
 
-# Trigger a payment, then inspect the event
-aws sqs receive-message --queue-url $QUEUE_URL --endpoint-url $AWS_ENDPOINT_URL
+# Trigger a payment, then inspect the event (no host AWS CLI needed)
+./scripts/sqs-tail.sh peek    # one-shot view of the queued messages
+./scripts/sqs-tail.sh tail    # watch and drain messages as they arrive
 ```
 
 Notes:
 - With `OUTBOX_PUBLISHER` unset the relay uses a `log` publisher (events logged, not delivered) — fine for unit-style local work.
-- **Redpanda** (`docker.redpanda.com/redpandadata/redpanda:latest`, Kafka-compatible) is available as a candidate event bus if you want to replace SNS fan-out; no Kafka adapter exists in the codebase today.
 - **MailHog** (`mailhog/mailhog:latest`) captures SMTP mail at `http://localhost:8025`; point `SMTP_HOST` at its SMTP port — `mailhog` when running inside the compose network, `localhost:1025` when running the service from the host — to inspect notification emails.
 - **MockServer** (`mockserver/mockserver:latest`, :1080) can stand in for a tenant webhook endpoint or gateway callback receiver while developing against the tenant-webhook worker.
 
