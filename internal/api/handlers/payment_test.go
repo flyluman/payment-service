@@ -41,9 +41,6 @@ func (f *fakeService) ProcessPayment(ctx context.Context, id uuid.UUID) (*transa
 func (f *fakeService) GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	return f.fetched, f.getErr
 }
-func (f *fakeService) GetGatewayMetadata(ctx context.Context, id uuid.UUID) (map[string]any, error) {
-	return nil, nil
-}
 func (f *fakeService) ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
 	return &ports.TransactionListResult{}, nil
 }

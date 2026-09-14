@@ -18,6 +18,7 @@ docs/
 postman/
 seed/
 migrations/
+observability/
 test/
 tools/
 

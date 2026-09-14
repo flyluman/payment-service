@@ -11,7 +11,7 @@ import (
 
 type ConfigStore interface {
 	GetGatewayConfig(ctx context.Context, gatewayID string) (*GatewayConfig, error)
-	ListActiveGateways(ctx context.Context, paymentMethod string) ([]*GatewayConfig, error)
+	ListActiveGateways(ctx context.Context) ([]*GatewayConfig, error)
 	GetFeeModel(ctx context.Context, gatewayID, paymentMethod string) (*GatewayFeeModel, error)
 	GetMetadataSchema(ctx context.Context, gatewayID string) (*GatewayMetadataSchema, error)
 	GetProcessingTimeout(ctx context.Context, gatewayID, paymentMethod string) (time.Duration, error)

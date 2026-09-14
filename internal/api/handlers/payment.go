@@ -23,7 +23,6 @@ type PaymentService interface {
 	Create(ctx context.Context, in payment.CreateInput) (payment.CreateResult, error)
 	ProcessPayment(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error)
 	GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
-	GetGatewayMetadata(ctx context.Context, transactionID uuid.UUID) (map[string]any, error)
 	ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error)
 	Authorize(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error)
 	Capture(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error)
@@ -53,11 +52,10 @@ type createPaymentRequest struct {
 }
 
 type createPaymentResponse struct {
-	TransactionID   string         `json:"transaction_id"`
-	Token           string         `json:"token"`
-	Status          string         `json:"status"`
-	GatewayMetadata map[string]any `json:"gateway_metadata,omitempty"`
-	FeeBreakdown    any            `json:"fee_breakdown,omitempty"`
+	TransactionID string `json:"transaction_id"`
+	Token         string `json:"token"`
+	Status        string `json:"status"`
+	FeeBreakdown  any    `json:"fee_breakdown,omitempty"`
 }
 
 type paymentResponse struct {
@@ -71,7 +69,6 @@ type paymentResponse struct {
 	CustomerEmail      string         `json:"customer_email,omitempty"`
 	Description        string         `json:"description,omitempty"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
-	GatewayMetadata    map[string]any `json:"gateway_metadata,omitempty"`
 	GatewayAmount      *int64         `json:"gateway_amount,omitempty"`
 	GatewayCurrency    string         `json:"gateway_currency,omitempty"`
 	FeeBreakdown       any            `json:"fee_breakdown,omitempty"`
@@ -179,10 +176,6 @@ func (h *PaymentHandler) Create(w http.ResponseWriter, r *http.Request) {
 			Status:        string(result.Transaction.Status),
 			FeeBreakdown:  result.Transaction.FeeBreakdown,
 		}
-		meta, _ := h.svc.GetGatewayMetadata(r.Context(), result.Transaction.ID)
-		if meta != nil {
-			resp.GatewayMetadata = meta
-		}
 		writeJSON(w, r, statusCode, resp)
 	case idempotency.Replayed:
 		resp := createPaymentResponse{
@@ -190,10 +183,6 @@ func (h *PaymentHandler) Create(w http.ResponseWriter, r *http.Request) {
 			Token:         result.Token,
 			Status:        string(result.Transaction.Status),
 			FeeBreakdown:  result.Transaction.FeeBreakdown,
-		}
-		meta, _ := h.svc.GetGatewayMetadata(r.Context(), result.Transaction.ID)
-		if meta != nil {
-			resp.GatewayMetadata = meta
 		}
 		writeJSON(w, r, http.StatusOK, resp)
 	case idempotency.InProgress:
@@ -233,10 +222,6 @@ func (h *PaymentHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := toPaymentResponse(txn)
-	meta, _ := h.svc.GetGatewayMetadata(r.Context(), id)
-	if meta != nil {
-		resp.GatewayMetadata = meta
-	}
 	writeJSON(w, r, http.StatusOK, resp)
 }
 

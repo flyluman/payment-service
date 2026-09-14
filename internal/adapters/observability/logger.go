@@ -17,7 +17,20 @@ type SlogLogger struct {
 }
 
 func NewSlogLogger(level slog.Level, svcName, svcVersion, env, hostname string) *SlogLogger {
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	h := stdoutJSONHandler(level)
+	base := slog.New(h).With(
+		"service", svcName,
+		"version", svcVersion,
+		"environment", env,
+		"hostname", hostname,
+	)
+	return &SlogLogger{base: base}
+}
+
+// stdoutJSONHandler returns the canonical stdout JSON handler with the
+// timestamp rendered as an RFC3339Nano "timestamp" attribute.
+func stdoutJSONHandler(level slog.Level) slog.Handler {
+	return slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: level,
 		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
@@ -27,34 +40,27 @@ func NewSlogLogger(level slog.Level, svcName, svcVersion, env, hostname string) 
 			return a
 		},
 	})
-	base := slog.New(h).With(
-		"service",     svcName,
-		"version",     svcVersion,
-		"environment", env,
-		"hostname",    hostname,
-	)
-	return &SlogLogger{base: base}
 }
 
 const redactedValue = "<redacted>"
 
 var sensitiveLogKeys = map[string]struct{}{
-	"vpa":              {},
-	"card_number":      {},
-	"pan":              {},
-	"cvv":              {},
-	"card_cvv":         {},
-	"token":            {},
-	"api_key":          {},
-	"client_secret":    {},
-	"client_id":        {},
-	"access_token":     {},
-	"key_secret":       {},
-	"publishable_key":  {},
-	"webhook_secret":   {},
-	"authorization":    {},
-	"bearer":           {},
-	"password":         {},
+	"vpa":             {},
+	"card_number":     {},
+	"pan":             {},
+	"cvv":             {},
+	"card_cvv":        {},
+	"token":           {},
+	"api_key":         {},
+	"client_secret":   {},
+	"client_id":       {},
+	"access_token":    {},
+	"key_secret":      {},
+	"publishable_key": {},
+	"webhook_secret":  {},
+	"authorization":   {},
+	"bearer":          {},
+	"password":        {},
 }
 
 func fieldsToAttrs(fields map[string]any) []any {

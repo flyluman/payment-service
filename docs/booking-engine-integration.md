@@ -113,7 +113,6 @@ Headers:
     "customer_email": "email",
     "description": "text",
     "metadata": {},
-    "gateway_metadata": {},
     "fee_breakdown": {
       "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "IQD" },
       "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },

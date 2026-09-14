@@ -11,8 +11,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
 	"github.com/crownroutes/payment-service/internal/ports"
 )
@@ -23,6 +21,7 @@ type Config struct {
 	ServiceName    string
 	ServiceVersion string
 	Environment    string
+	Hostname       string
 	ExportInterval time.Duration
 }
 
@@ -46,11 +45,7 @@ func New(ctx context.Context, cfg Config) (*Recorder, error) {
 		return nil, fmt.Errorf("otel: build exporter: %w", err)
 	}
 
-	res, err := resource.New(ctx, resource.WithAttributes(
-		semconv.ServiceName(cfg.ServiceName),
-		semconv.ServiceVersion(cfg.ServiceVersion),
-		semconv.DeploymentEnvironment(cfg.Environment),
-	))
+	res, err := resourceFor(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("otel: build resource: %w", err)
 	}

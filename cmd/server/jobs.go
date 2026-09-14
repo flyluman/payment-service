@@ -4,6 +4,9 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	leaseexpiry "github.com/crownroutes/payment-service/internal/jobs/lease_expiry"
 	partitionmanager "github.com/crownroutes/payment-service/internal/jobs/partition_manager"
@@ -132,10 +135,18 @@ func startJobs(ctx context.Context, d *deps) error {
 	}
 }
 
+func otelTracer() trace.Tracer {
+	return otel.Tracer("payment-service/cmd/server/jobs")
+}
+
 func runJobOnce(ctx context.Context, logger interface {
 	Warn(string, map[string]any)
 }, name string, fn func(context.Context) error) {
+	ctx, span := otelTracer().Start(ctx, "job."+name)
+	defer span.End()
+
 	if err := fn(ctx); err != nil {
+		span.RecordError(err)
 		logger.Warn("job.failed", map[string]any{"job": name, "error": err.Error()})
 	}
 }

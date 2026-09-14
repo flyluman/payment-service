@@ -93,26 +93,22 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	logger := observability.NewSlogLogger(
-		bootstrap.ParseLogLevel(cfg.Observability.LogLevel),
-		cfg.App.ServiceName, cfg.App.ServiceVersion,
-		cfg.App.Environment, hostname(),
-	)
-
 	// Root context: cancelled on SIGINT / SIGTERM so every goroutine drains.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// ── Metrics ──────────────────────────────────────────────────────────
-	metrics, metricsClose, err := observability.NewMetrics(ctx, cfg)
+	// ── Observability (logger + metrics + traces) ────────────────────────
+	obs, err := observability.New(ctx, cfg, bootstrap.ParseLogLevel(cfg.Observability.LogLevel), hostname())
 	if err != nil {
-		return fmt.Errorf("init metrics: %w", err)
+		return fmt.Errorf("init observability: %w", err)
 	}
 	defer func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = metricsClose(flushCtx)
+		_ = obs.Close(flushCtx)
 	}()
+	logger := obs.Logger
+	metrics := obs.Metrics
 
 	// ── Postgres ─────────────────────────────────────────────────────────
 	connectPolicy := bootstrap.RetryPolicy{

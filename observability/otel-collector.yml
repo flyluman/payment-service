@@ -1,0 +1,45 @@
+# OpenTelemetry Collector — local relay from the payment-service (OTLP) to
+# OpenObserve. The app's OTLP exporters can't send the Basic-auth + stream-name
+# headers OpenObserve requires for ingestion, so this collector injects them.
+#
+# Receives: OTLP gRPC :4317 and OTLP HTTP :4318 (the app's OTLP_ENDPOINT).
+# Forwards: OTLP HTTP to OpenObserve /api/default (org = default, stream = default)
+# across all signals (logs, metrics, traces).
+#
+# Env vars (set in docker-compose.yml):
+#   ZO_ROOT_USER_EMAIL / ZO_ROOT_USER_PASSWORD — OpenObserve root creds for Basic auth.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  otlphttp/openobserve:
+    endpoint: http://openobserve:5080/api/default
+    headers:
+      stream-name: default
+    auth:
+      authenticator: basicauth/openobserve
+
+extensions:
+  basicauth/openobserve:
+    client_auth:
+      username: ${env:ZO_ROOT_USER_EMAIL}
+      password: ${env:ZO_ROOT_USER_PASSWORD}
+
+service:
+  extensions: [basicauth/openobserve]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/openobserve]
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/openobserve]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/openobserve]

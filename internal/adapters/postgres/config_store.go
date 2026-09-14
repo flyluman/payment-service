@@ -80,7 +80,7 @@ WHERE gc.gateway_id = $1`, gatewayID)
 	return cfg, nil
 }
 
-func (s *ConfigStore) ListActiveGateways(ctx context.Context, paymentMethod string) ([]*ports.GatewayConfig, error) {
+func (s *ConfigStore) ListActiveGateways(ctx context.Context) ([]*ports.GatewayConfig, error) {
 	rows, err := s.db.ReadPool().Query(ctx, `SELECT
     gc.gateway_id, gc.display_name, gc.is_active,
     gc.min_amount, gc.max_amount,
@@ -91,8 +91,7 @@ func (s *ConfigStore) ListActiveGateways(ctx context.Context, paymentMethod stri
     COALESCE(cb.cooldown_until, '0001-01-01 00:00:00+00')
 FROM gateway_config gc
 LEFT JOIN gateway_circuit_breaker_state cb ON cb.gateway_id = gc.gateway_id
-WHERE gc.is_active = true
-  AND $1 = ANY(gc.supported_methods)`, paymentMethod)
+WHERE gc.is_active = true`)
 	if err != nil {
 		return nil, fmt.Errorf("config_store: list active gateways: %w", err)
 	}

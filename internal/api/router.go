@@ -110,6 +110,7 @@ func NewRouter(deps Deps) http.Handler {
 	chain := []func(http.Handler) http.Handler{
 		middleware.RequestID,
 		middleware.TraceID,
+		middleware.Tracing,
 		middleware.RequestLog(deps.Logger),
 		middleware.Recover(deps.Logger),
 	}

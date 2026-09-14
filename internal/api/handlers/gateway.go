@@ -8,12 +8,13 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/crownroutes/payment-service/internal/api/middleware"
 	"github.com/crownroutes/payment-service/internal/domain/fees"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type GatewayService interface {
-	ListActiveGateways(ctx context.Context, paymentMethods []string) ([]*ports.GatewayConfig, error)
+	ListActiveGateways(ctx context.Context) ([]*ports.GatewayConfig, error)
 }
 
 type FeeEstimator interface {
@@ -31,26 +32,21 @@ func NewGatewayHandler(svc GatewayService, fe FeeEstimator) *GatewayHandler {
 }
 
 type gatewayResponse struct {
-	GatewayID           string          `json:"gateway_id"`
-	DisplayName         string          `json:"display_name"`
-	SupportedMethods    []string        `json:"supported_methods"`
-	SupportedCurrencies []string        `json:"supported_currencies"`
-	FeeBreakdown        *fees.Breakdown `json:"fee_breakdown,omitempty"`
+	GatewayID           string                     `json:"gateway_id"`
+	DisplayName         string                     `json:"display_name"`
+	SupportedMethods    []string                   `json:"supported_methods"`
+	SupportedCurrencies []string                   `json:"supported_currencies"`
+	FeeBreakdowns       map[string]*fees.Breakdown `json:"fee_breakdowns,omitempty"`
 }
 
 func (h *GatewayHandler) List(w http.ResponseWriter, r *http.Request) {
-	methods := strings.Split(strings.TrimSpace(r.URL.Query().Get("payment_method")), ",")
-	if len(methods) == 0 || (len(methods) == 1 && methods[0] == "") {
-		methods = []string{"card", "upi", "netbanking", "wallet"}
-	}
-
 	currency := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("currency")))
 	var amount int64
 	if a := r.URL.Query().Get("amount"); a != "" {
 		amount, _ = strconv.ParseInt(a, 10, 64)
 	}
 	var tenantID uuid.UUID
-	if tid := r.URL.Query().Get("tenant_id"); tid != "" {
+	if tid := middleware.TenantIDFromContext(r.Context()); tid != "" {
 		tenantID, _ = uuid.Parse(tid)
 	}
 	computeFees := currency != "" && amount > 0 && h.fees != nil
@@ -60,7 +56,7 @@ func (h *GatewayHandler) List(w http.ResponseWriter, r *http.Request) {
 		rates, _ = h.fees.GetCurrencyRates(r.Context(), tenantID)
 	}
 
-	configs, err := h.svc.ListActiveGateways(r.Context(), methods)
+	configs, err := h.svc.ListActiveGateways(r.Context())
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "gateway_list_failed", "could not list gateways")
 		return
@@ -75,23 +71,27 @@ func (h *GatewayHandler) List(w http.ResponseWriter, r *http.Request) {
 			SupportedCurrencies: append([]string(nil), cfg.SupportedCurrencies...),
 		}
 		if computeFees && containsCurrency(cfg.SupportedCurrencies, currency) {
-			method := methods[0]
-			if fm, err := h.fees.GetFeeModel(r.Context(), cfg.GatewayID, method); err == nil && fm != nil {
-				chargesCurrency := fm.ChargesCurrency
-				if chargesCurrency == "" {
-					chargesCurrency = currency
-				}
-				var fixedFee float64
-				if fm.FixedFee > 0 {
-					fixedFee = float64(fm.FixedFee)
-				}
-				var ratio float64
-				if fm.PercentageBPS > 0 {
-					ratio = float64(fm.PercentageBPS) / 100.0
-				}
-				if bd, err := fees.Calculate(amount, currency, chargesCurrency, fixedFee, ratio, rates); err == nil {
-					if verr := fees.Validate(bd); verr == nil {
-						out[i].FeeBreakdown = bd
+			for _, method := range cfg.SupportedMethods {
+				if fm, err := h.fees.GetFeeModel(r.Context(), cfg.GatewayID, method); err == nil && fm != nil {
+					chargesCurrency := fm.ChargesCurrency
+					if chargesCurrency == "" {
+						chargesCurrency = currency
+					}
+					var fixedFee float64
+					if fm.FixedFee > 0 {
+						fixedFee = float64(fm.FixedFee)
+					}
+					var ratio float64
+					if fm.PercentageBPS > 0 {
+						ratio = float64(fm.PercentageBPS) / 100.0
+					}
+					if bd, err := fees.Calculate(amount, currency, chargesCurrency, fixedFee, ratio, rates); err == nil {
+						if verr := fees.Validate(bd); verr == nil {
+							if out[i].FeeBreakdowns == nil {
+								out[i].FeeBreakdowns = make(map[string]*fees.Breakdown)
+							}
+							out[i].FeeBreakdowns[method] = bd
+						}
 					}
 				}
 			}

@@ -101,22 +101,17 @@ Fixed charge:   500 IQD
 Total:      51,750 IQD
 ```
 
-### Read FIB QR Code
+### Render Gateway-Specific UI
+
+`gateway_metadata` (QR code, app links, etc.) is **not** exposed through the API responses. It is rendered internally by the hosted checkout page at `{PAYMENT_DOMAIN}/pay/{transaction_id}?token={token}`.
 
 ```javascript
-// data.gateway_metadata contains gateway-specific output
-const { gateway_metadata } = data;
-
-// FIB checkout
-displayQRCode(gateway_metadata.qr_code);           // base64 image
-showCode(gateway_metadata.readable_code);           // "FIB-ABC-123"
-showLinks({
-  personal: gateway_metadata.personal_app_link,
-  business: gateway_metadata.business_app_link,
-  corporate: gateway_metadata.corporate_app_link,
-});
-startTimer(gateway_metadata.valid_until);           // countdown
+// Redirect to the hosted checkout page; it renders the gateway-specific UI
+window.location.href =
+  `${PAYMENT_DOMAIN}/pay/${transactionId}?token=${token}`;
 ```
+
+For a fully custom UI that needs FIB's QR data, request it from your backend rather than the payment API:
 
 ### Listen for Status Updates (SSE)
 
@@ -171,7 +166,7 @@ const interval = setInterval(async () => {
 | Issue | Fix |
 |-------|-----|
 | "Invalid or missing token" | Token expired or already used. Create new payment. |
-| QR code not showing | Check `gateway_metadata.qr_code` exists in payment response |
+| QR code not showing | Gateway metadata is only rendered on the hosted `/pay/{id}` page, not in API responses |
 | Page stuck on "Loading..." | Verify `transaction_id` is a valid UUID |
 | Redirect not happening | Ensure `redirect_url` was set at payment creation |
 | "Taking longer than expected" | 30s timeout. User may still be paying — check status. |

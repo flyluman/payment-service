@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Payment Service API (FIB)",
-    "description": "Payment Service API collection with FIB (Fast Iraqi Bank) gateway. Includes all 22 endpoints for server-to-server calls, browser checkout, and webhook handling.",
+    "description": "Payment Service API collection with FIB (Fast Iraqi Bank) gateway. Covers all 33 routes for server-to-server calls, browser checkout, webhooks, manual capture, reconciliation, and tenant webhook configs.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -74,18 +74,23 @@
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{base_url}}/api/v1/gateways?payment_method=card",
+              "raw": "{{base_url}}/api/v1/gateways?amount=50000&currency=IQD",
               "host": ["{{base_url}}"],
               "path": ["api", "v1", "gateways"],
               "query": [
                 {
-                  "key": "payment_method",
-                  "value": "card",
-                  "description": "Filter by payment method"
+                  "key": "amount",
+                  "value": "50000",
+                  "description": "Amount for per-gateway, per-method fee estimation"
+                },
+                {
+                  "key": "currency",
+                  "value": "IQD",
+                  "description": "Currency for per-gateway, per-method fee estimation"
                 }
               ]
             },
-            "description": "List available gateways. Currently only FIB."
+            "description": "List all active gateways. Tenant is resolved from the authenticated service token (ops tokens list without per-tenant FX rates). Include amount + currency to get a per-method fee_breakdowns map (keyed by payment method), same structure as the create-payment response."
           },
           "response": []
         }
@@ -222,7 +227,7 @@
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{base_url}}/api/v1/payments?limit=10&status=PENDING,SUCCEEDED",
+              "raw": "{{base_url}}/api/v1/payments?limit=10&status=PENDING,CAPTURED,FAILED",
               "host": ["{{base_url}}"],
               "path": ["api", "v1", "payments"],
               "query": [
@@ -233,7 +238,7 @@
                 },
                 {
                   "key": "status",
-                  "value": "PENDING,SUCCEEDED",
+                  "value": "PENDING,CAPTURED,FAILED",
                   "description": "Filter by status"
                 }
               ]
@@ -265,6 +270,110 @@
               }
             ],
             "description": "Download transactions as CSV (Accept: text/csv header)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Manual Capture",
+      "item": [
+        {
+          "name": "Authorize Payment",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{transaction_id}}/authorize",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments", "{{transaction_id}}", "authorize"]
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Authorize a PENDING/PROCESSING payment (manual capture flow). Requires ops token. No request body."
+          },
+          "response": []
+        },
+        {
+          "name": "Capture Payment",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{transaction_id}}/capture",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments", "{{transaction_id}}", "capture"]
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Capture an AUTHORIZED payment (manual capture flow). Requires ops token. No request body."
+          },
+          "response": []
+        },
+        {
+          "name": "Settle Payment",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{transaction_id}}/settle",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments", "{{transaction_id}}", "settle"]
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Settle a CAPTURED payment (manual capture flow). Requires ops token. No request body."
           },
           "response": []
         }
@@ -481,6 +590,294 @@
               "raw": "{\n  \"reason\": \"Retrying failed webhook delivery\"\n}"
             },
             "description": "Replay a failed dead letter event. Returns new_event_id."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Reconciliation",
+      "item": [
+        {
+          "name": "Create Job",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/reconciliation/jobs",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "reconciliation", "jobs"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gateway_id\": \"fib\",\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"period_start\": \"2026-01-01T00:00:00Z\",\n  \"period_end\": \"2026-01-31T23:59:59Z\"\n}"
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Create a reconciliation job for a tenant + period (batch). For a single-transaction job, omit period_start/period_end and supply transaction_id instead."
+          },
+          "response": []
+        },
+        {
+          "name": "List Jobs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/reconciliation/jobs?gateway_id=fib&status=PENDING",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "reconciliation", "jobs"],
+              "query": [
+                {
+                  "key": "gateway_id",
+                  "value": "fib",
+                  "description": "Filter by gateway"
+                },
+                {
+                  "key": "status",
+                  "value": "PENDING",
+                  "description": "Filter by job status"
+                }
+              ]
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "List reconciliation jobs. Requires ops token."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Job",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/reconciliation/jobs/{{reconciliation_job_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "reconciliation", "jobs", "{{reconciliation_job_id}}"]
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Get a single reconciliation job by id."
+          },
+          "response": []
+        },
+        {
+          "name": "Run Job",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/reconciliation/jobs/{{reconciliation_job_id}}/run",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "reconciliation", "jobs", "{{reconciliation_job_id}}", "run"]
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Run a reconciliation job immediately. Returns {\"status\":\"completed\"}. No request body."
+          },
+          "response": []
+        },
+        {
+          "name": "List Entries",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/reconciliation/jobs/{{reconciliation_job_id}}/entries?mismatch_type=&resolution_status=",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "reconciliation", "jobs", "{{reconciliation_job_id}}", "entries"],
+              "query": [
+                {
+                  "key": "mismatch_type",
+                  "value": "",
+                  "description": "Filter by mismatch type"
+                },
+                {
+                  "key": "resolution_status",
+                  "value": "",
+                  "description": "Filter by resolution status"
+                }
+              ]
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "List reconciliation entries for a job."
+          },
+          "response": []
+        },
+        {
+          "name": "Resolve Entry",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/reconciliation/jobs/{{reconciliation_job_id}}/entries/{{reconciliation_entry_id}}/resolve",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "reconciliation", "jobs", "{{reconciliation_job_id}}", "entries", "{{reconciliation_entry_id}}", "resolve"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notes\": \"Verified against gateway settlement report\"\n}"
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Resolve a reconciliation entry with notes. Returns {\"status\":\"resolved\"}."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Tenant Webhooks",
+      "item": [
+        {
+          "name": "List Webhook Configs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenant-webhooks",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenant-webhooks"]
+            },
+            "description": "List tenant webhook delivery configs. Signing secrets are redacted."
+          },
+          "response": []
+        },
+        {
+          "name": "Upsert Webhook Config",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenant-webhooks/{{tenant_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenant-webhooks", "{{tenant_id}}"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"endpoint_url\": \"https://myapp.com/api/webhooks/payment\",\n  \"signing_secret\": \"whsec_xyz\",\n  \"is_active\": true\n}"
+            },
+            "description": "Create or update a tenant webhook delivery config."
           },
           "response": []
         }

@@ -313,11 +313,11 @@ Notable rules baked into `transaction.go` / `state_machine.go`:
 
 ## 5. Creating and Processing a Payment
 
-The payment flow is a **single-step** synchronous call: `POST /api/v1/payments` creates the transaction, synchronously calls the gateway's `InitiatePayment`, and embeds the gateway-specific output (`gateway_metadata`) in the response. The browser then renders FIB's QR code, Stripe's card form, or Razorpay's checkout button directly from the embedded metadata — no second API call needed.
+The payment flow is a **single-step** synchronous call: `POST /api/v1/payments` creates the transaction and synchronously calls the gateway's `InitiatePayment`. The gateway-specific output (`gateway_metadata`) is persisted for the checkout page, which renders FIB's QR code, Stripe's card form, or Razorpay's checkout button — it is **not** returned in the create response.
 
 ### Step 1: Create + Initiate (single API call)
 
-`POST /api/v1/payments` (service token, `Idempotency-Key` required) creates a transaction in `PENDING` state, calls the gateway's `InitiatePayment`, transitions to `PROCESSING`, and returns the gateway-specific output in `gateway_metadata`. A `GATEWAY_INITIATE` outbox event is also written as a fallback retry.
+`POST /api/v1/payments` (service token, `Idempotency-Key` required) creates a transaction in `PENDING` state, calls the gateway's `InitiatePayment`, transitions to `PROCESSING`, and returns the transaction ID, checkout token, and status. A `GATEWAY_INITIATE` outbox event is also written as a fallback retry.
 
 ```mermaid
 sequenceDiagram
@@ -344,8 +344,8 @@ sequenceDiagram
     Svc->>Repo: UpdateGatewayReference(refID)
     Svc->>Repo: UpdateStatus → PROCESSING
     Svc->>Outbox: Write(raw metadata insert — same tx)
-    Svc-->>H: CreateResult{Txn, gateway_metadata}
-    H-->>C: 201 Created {transaction_id, gateway_metadata, status}
+    Svc-->>H: CreateResult{Txn}
+    H-->>C: 201 Created {transaction_id, token, status}
 ```
 
 Key implementation details:
@@ -354,7 +354,7 @@ Key implementation details:
 - **The processing lease** (`processing_lease` table, `LeaseStore.TryAcquireDirect`) prevents two concurrent `ProcessGatewayInitiate` calls from both calling the gateway. If the lease isn't acquired, the event is skipped (the other instance will handle it).
 - **`EstimatedTimeoutSeconds`** comes from `ConfigStore.GetProcessingTimeout(gateway, method)` and becomes the lease TTL — it must be positive or transaction creation fails.
 - If `syncInitiate` errors (e.g. gateway adapter unavailable), the handler returns **`500`** with the transaction in `PENDING` state. The caller can retry with the same idempotency key (→ `200 Replayed`), and the outbox relay will eventually process the `GATEWAY_INITIATE` event as a fallback. The `GATEWAY_INITIATE` outbox event handler (`ProcessGatewayInitiate`) is idempotent — if the gateway reference already exists, it's a no-op.
-- `gateway_metadata` contains gateway-specific output (e.g. `client_secret` for Stripe, `qr_code`/`readable_code`/`valid_until` for FIB, `order_id`/`key_id` for Razorpay) and is persisted in the `transaction_gateway_metadata` table for later retrieval.
+- `gateway_metadata` contains gateway-specific output (e.g. `client_secret` for Stripe, `qr_code`/`readable_code`/`valid_until` for FIB, `order_id`/`key_id` for Razorpay). It is persisted in the `transaction_gateway_metadata` table and consumed by the checkout page (`GET /pay/{transaction_id}`) — it is **not** returned in the create or `GET /api/v1/payments/{id}` responses.
 - `PublishableKey` is included in `gateway_metadata` for Stripe and Razorpay so the browser can initialize the gateway SDK without a separate config call.
 
 ### Step 2: Complete payment via checkout page
@@ -401,7 +401,7 @@ sequenceDiagram
 
 ## 6. Gateway Selection & Capabilities
 
-The payment path uses the **explicit `gateway_id`** from the caller's request. Each tenant configures which gateways they have credentials for via the tenant gateway config API (`/api/v1/tenants/{tenant_id}/gateways`). The caller discovers available gateways via `GET /api/v1/gateways` (optionally filtered by `?payment_method=`) and passes the chosen `gateway_id` in the payment request.
+The payment path uses the **explicit `gateway_id`** from the caller's request. Each tenant configures which gateways they have credentials for via the tenant gateway config API (`/api/v1/tenants/{tenant_id}/gateways`). The caller discovers available gateways via `GET /api/v1/gateways` (returns all active gateways; per-tenant FX rates are resolved from the authenticated service token) and passes the chosen `gateway_id` in the payment request.
 
 `GET /api/v1/gateways` returns:
 ```json
@@ -1142,7 +1142,9 @@ The `broadcast.InMemoryBus` is a simple pub/sub system backed by Go channels. Ea
 
 - **Structured logging** (`internal/adapters/observability.SlogLogger`) wraps `log/slog` with a custom `TRACE` level below `DEBUG`, and **automatically redacts** known-sensitive field keys (`vpa`, `card_number`, `pan`, `cvv`, `card_cvv`, `token`, `api_key`, `client_secret`, `secret`, `password`, `authorization`, `access_token`, `refresh_token`, `private_key` — case-insensitive) to `<redacted>` before they're ever written to output.
 - **Error-log contract enforcement**: `Logger.Error` checks for required fields (`error_code`, `trace_id`, `transaction_id`) on every call and appends a `log_validation_error` note if any are missing — a lightweight guardrail against error logs that are hard to correlate later, without failing the call itself.
-- **Metrics**: a `MetricRecorder` port is defined with counters/histograms/gauges for transaction outcomes, gateway fallback/circuit-breaker events, outbox publish latency/failures, and rate-limiter fallback activity (see `internal/ports/metrics.go` for the full catalog); the shipped implementation (`NewNoopMetrics`) is a no-op, ready to be swapped for a real backend (StatsD/Prometheus/etc.).
+- **Metrics**: a `MetricRecorder` port is defined with counters/histograms/gauges for transaction outcomes, gateway fallback/circuit-breaker events, outbox publish latency/failures, and rate-limiter fallback activity (see `internal/ports/metrics.go` for the full catalog). Backends are selected via `OBSERVABILITY_BACKEND`: `otel`/`otlp` (a real OTLP exporter — grpc or `http/protobuf`), `stdout`/`noop` (discard). `config.yaml` defaults to `otel` pointing at the local `otel-collector` relay → OpenObserve (§31); in an empty environment it degrades to no-op without failing.
+- **Logs**: with `OBSERVABILITY_BACKEND=otel|otlp` the slog logger is a dual handler that writes JSON to stdout *and* bridges each record to the OTLP log provider via `otelslog` — so every log lands in OpenObserve's Logs tab while stdout keeps working unchanged. With `stdout`/`noop` it stays stdout-only.
+- **Traces**: with `otlp` a `TracerProvider` is registered globally. An OTel middleware in the request chain starts a span per request (joined to any incoming W3C `traceparent`), exposing `X-Trace-ID`/`X-Span-ID` response headers; background jobs open a `job.<name>` span each run. Trace/log exporters are wired via the same collector relay.
 
 ---
 
@@ -1248,7 +1250,7 @@ Amount mismatches within configurable thresholds (basis points + absolute cap) a
 | `GET` | `/pay/{transaction_id}` | checkout token (`?token=`) | Checkout page |
 | `GET` | `/pay/success` | checkout token (`?token=`) | Payment success landing page |
 | `GET` | `/pay/failure` | checkout token (`?token=`) | Payment failure landing page |
-| `GET` | `/api/v1/gateways` | service/ops token | List available gateways (optional `?payment_method=` filter) |
+| `GET` | `/api/v1/gateways` | service/ops token | List all active gateways (per-method `fee_breakdowns` when `?currency=` + `?amount=` provided) |
 | `POST` | `/api/v1/payments` | service token | Create transaction + initiate gateway payment. Requires `Idempotency-Key`. |
 | `GET` | `/api/v1/payments` | service/ops token | List transactions with filters (see below) |
 | `GET` | `/api/v1/payments/{id}` | service/ops or checkout token | Fetch a transaction by ID |
@@ -1331,10 +1333,6 @@ Content-Type: application/json
     "transaction_id": "txn-uuid",
     "status": "PROCESSING",
     "token": "checkout-token",
-    "gateway_metadata": {
-      "client_secret": "pi_xxx_secret_yyy",
-      "publishable_key": "pk_test_xxx"
-    },
     "fee_breakdown": {
       "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "BDT" },
       "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },
@@ -1356,14 +1354,6 @@ Content-Type: application/json
     "transaction_id": "txn-uuid",
     "status": "PROCESSING",
     "token": "checkout-token",
-    "gateway_metadata": {
-      "qr_code": "data:image/png;base64,...",
-      "readable_code": "FIB-ABC123",
-      "personal_app_link": "https://fib.app/pay/...",
-      "business_app_link": "https://fib.app/business/...",
-      "corporate_app_link": "https://fib.app/corporate/...",
-      "valid_until": "2026-01-01T00:05:00Z"
-    },
     "fee_breakdown": {
       "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "IQD" },
       "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },
@@ -1491,7 +1481,7 @@ All configuration comes from `config.yaml` with environment variable overrides, 
 | Security | `TLS_CERT_REFRESH_INTERVAL_SECONDS` | `security.cert_refresh_interval_sec` | — | |
 | Security | `SERVICE_TOKENS` | `security.service_tokens` | — | `token=tenantID:userID,...` |
 | Security | `OPS_TOKENS` | `security.ops_tokens` | — | Comma-separated |
-| Observability | `OBSERVABILITY_BACKEND` | `observability.backend` | — | |
+| Observability | `OBSERVABILITY_BACKEND` | `observability.backend` | `otel` in config.yaml | `otel`/`otlp` (OTLP exporter), `stdout`/`noop` (discard) |
 | Observability | `LOG_LEVEL` | `observability.log_level` | — | `error`, `warn`, `info`, `debug`, `trace` |
 | Observability | `OTLP_ENDPOINT` | `observability.otlp_endpoint` | — | |
 | Observability | `OTLP_PROTOCOL` | `observability.otlp_protocol` | — | |
@@ -1515,7 +1505,8 @@ All configuration comes from `config.yaml` with environment variable overrides, 
 
 ```bash
 # Full local stack: Postgres, Valkey, Floci (SNS/SQS/S3), Redpanda (Kafka),
-# MailHog (SMTP), and the payment-service itself (built via the multi-stage Dockerfile)
+# MailHog (SMTP), MockServer, OpenObserve (observability via otel-collector),
+# and the payment-service itself (built via the multi-stage Dockerfile)
 docker compose up --build
 
 # ...or just the infra, then run the service from source
@@ -1572,9 +1563,35 @@ aws sqs receive-message --queue-url $QUEUE_URL --endpoint-url $AWS_ENDPOINT_URL
 
 Notes:
 - With `OUTBOX_PUBLISHER` unset the relay uses a `log` publisher (events logged, not delivered) — fine for unit-style local work.
-- **Redpanda** (`redpandadata/redpanda:latest`, Kafka-compatible) is available as a candidate event bus if you want to replace SNS fan-out; no Kafka adapter exists in the codebase today.
+- **Redpanda** (`docker.redpanda.com/redpandadata/redpanda:latest`, Kafka-compatible) is available as a candidate event bus if you want to replace SNS fan-out; no Kafka adapter exists in the codebase today.
 - **MailHog** (`mailhog/mailhog:latest`) captures SMTP mail at `http://localhost:8025`; point `SMTP_HOST` at its SMTP port — `mailhog` when running inside the compose network, `localhost:1025` when running the service from the host — to inspect notification emails.
 - **MockServer** (`mockserver/mockserver:latest`, :1080) can stand in for a tenant webhook endpoint or gateway callback receiver while developing against the tenant-webhook worker.
+
+### Observability (OpenObserve)
+
+The stack includes [OpenObserve](https://openobserve.ai) (`public.ecr.aws/zinclabs/openobserve:latest`) as the metrics backend and an OpenTelemetry Collector relay in front of it — the app's OTLP exporter can't send the Basic-auth + `stream-name` headers OpenObserve requires for ingestion, so the collector injects them.
+
+```bash
+# OpenObserve UI
+open http://localhost:5080            # root@example.com / Complexpass#123
+
+# The app is wired by default (config.yaml): OBSERVABILITY_BACKEND=otel,
+# OTLP_ENDPOINT=http://localhost:4318 (or :4317 gRPC), OTLP_PROTOCOL=http/protobuf.
+# Metrics land under the `default` stream ~10s after the first request.
+
+# Quick sanity check — push a metric straight through the collector and view it:
+# (requires the collector's OTLP HTTP receiver; auth is injected by the relay)
+curl -s http://localhost:4318/v1/metrics \
+  -H 'Content-Type: application/x-protobuf' \
+  --data-binary @- <<'EOF'
+<OTLP/HTTP metrics protobuf payload>
+EOF
+```
+
+Notes:
+- `otel-collector` (`otel/opentelemetry-collector-contrib:latest`) listens on `:4317` (gRPC) and `:4318` (HTTP) and forwards to `http://openobserve:5080/api/default` (org `default`, stream `default`). Config: `observability/otel-collector.yml`.
+- OpenObserve stores on disk (`openobserve-data` volume); wipe it with `docker compose down -v`.
+- The app exports **metrics, logs, and traces** through the collector to OpenObserve — all three tabs populate once traffic flows.
 
 ### Seed Data
 
@@ -1586,8 +1603,8 @@ psql -h localhost -U payment -d payment_dev -f seed/seed.sql
 
 This creates:
 - **Gateway catalog**: Stripe, Razorpay, and FIB entries with timeouts, fee models, and metadata schemas
-- **Tenant gateway config**: FIB sandbox credentials for tenant `00000000-...-0001`
-- **Sample transaction**: 50,000 IQD CAPTURED payment with FIB QR code metadata
+- **Tenant gateway config**: FIB sandbox credentials for tenant `11111111-1111-1111-1111-111111111111`
+- **Sample transaction**: 50,000 IQD CAPTURED payment with FIB QR code metadata (tenant `00000000-...-0001`)
 - **Notification templates**: PAYMENT_SUCCESS, PAYMENT_FAILURE, REFUND_COMPLETED, REFUND_FAILED
 - **Circuit breaker state**: all gateways start in CLOSED (healthy)
 - **Currency exchange rates**: USD→IQD (1500, 3% markup), IQD→USD (0.000667, 2% markup)

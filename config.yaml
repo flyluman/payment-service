@@ -1,11 +1,18 @@
-# Payment Service — local development configuration.
-# Non-secret defaults live here; secrets and deployment overrides come from
-# environment variables (which take precedence over every value below).
+# Payment Service — complete configuration reference.
+#
+# Every config key is present below. Non-secret values default to the local
+# docker-compose stack (Postgres, Valkey, Floci SNS, MailHog SMTP, OpenObserve
+# via the otel-collector relay). Sensitive values are left empty here and are
+# provided via environment variables (which take precedence over this file) or
+# the auto-loaded `.env` file. Keep `.env` minimal: secrets only (SERVICE_TOKENS,
+# OPS_TOKENS, DATABASE_PASSWORD, ENCRYPTION_KEY, SMTP/SMS/TLS) plus the AWS SDK
+# vars that are not config-bindable (AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY). See `.env.example` and README §30 for the reference.
 
 app:
   service_name: payment-service
-  service_version: 1.0.0
   environment: dev
+  service_version: 1.0.0
   port: 8080
   mtls_strict_mode: false
 
@@ -16,11 +23,13 @@ startup:
 
 database:
   primary_host: localhost
+  replica_host: ""
   port: 5432
   name: payment_dev
   user: payment
-  password: payment
+  password: payment # local dev only; override with DATABASE_PASSWORD
   ssl_mode: disable
+  search_path: ""
   max_open_conns: 10
   max_idle_conns: 2
   conn_max_lifetime_sec: 1800
@@ -37,10 +46,15 @@ valkey:
   write_timeout_sec: 3
 
 sns:
-  payment_events_topic: ""
+  # Floci (local AWS emulator) topic ARN. Publish only succeeds once the topic
+  # exists — the compose `floci-init` service creates it on startup.
+  payment_events_topic: "arn:aws:sns:us-east-1:000000000000:payment-events"
 
 aws:
   region: us-east-1
+  # AWS_ENDPOINT_URL / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are NOT config-
+  # bindable; the AWS SDK reads them straight from the environment. For Floci
+  # set AWS_ENDPOINT_URL=http://localhost:4566 with any credentials (e.g. test).
 
 outbox:
   shard_count: 64
@@ -50,7 +64,7 @@ outbox:
   max_attempts: 5
   batch_size: 50
   claim_ttl_sec: 60
-  publisher: log
+  publisher: sns # `log` disables delivery (events logged only); `sns` fans out to the topic above
   sns_aggregate_version_attr: false
   worker_index: 0
   worker_count: 1
@@ -68,22 +82,30 @@ gateway:
 
 notification:
   smtp:
-    host: ""
-    port: 587
-    username: ""
-    password: ""
-    from: ""
+    host: localhost # MailHog; set SMTP_HOST=mailhog inside the compose network
+    port: 1025
+    username: "" # sensitive — set via SMTP_USERNAME
+    password: "" # sensitive — set via SMTP_PASSWORD
+    from: payments@example.com
   sms:
     provider: ""
-    api_key: ""
+    api_key: "" # sensitive — set via SMS_API_KEY
     from: ""
 
 observability:
-  backend: stdout
+  backend: otel # otel/otlp | stdout/noop (discard) — requires otlp_endpoint
   log_level: debug
+  otlp_endpoint: "http://localhost:4318" # local otel-collector relay → OpenObserve
+  otlp_protocol: http/protobuf # http/protobuf | grpc
 
 security:
+  encryption_key: "" # sensitive — hex 256-bit; empty = plaintext credentials
+  tls_cert_file: "" # sensitive — paths; empty = plain HTTP
+  tls_key_file: ""
+  tls_ca_file: ""
   cert_refresh_interval_sec: 3600
+  service_tokens: "" # sensitive — token=tenantID:userID,...; at least one of this or ops_tokens required
+  ops_tokens: "" # sensitive — comma-separated
 
 jobs:
   lease_expiry_interval_sec: 60
@@ -91,3 +113,4 @@ jobs:
   partition_weeks_ahead: 2
   partition_retention_weeks: 2
   partition_drop_after_days: 14
+  reconciliation_interval_sec: 300

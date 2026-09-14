@@ -30,9 +30,6 @@ func (s stubService) ProcessPayment(ctx context.Context, id uuid.UUID) (*transac
 func (s stubService) GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	return s.txn, nil
 }
-func (s stubService) GetGatewayMetadata(ctx context.Context, id uuid.UUID) (map[string]any, error) {
-	return nil, nil
-}
 func (s stubService) ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
 	return &ports.TransactionListResult{}, nil
 }
