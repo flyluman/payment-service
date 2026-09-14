@@ -56,4 +56,15 @@ logs/
 # Compiled binaries
 /api
 /paymentservice
-server
+/payment-service
+/server
+/bin
+
+# Go coverage / profiling
+coverage.html
+*.prof
+*.orig
+*.rej
+
+# Local compose overrides
+docker-compose.override.yml

@@ -82,7 +82,7 @@ Configure `callback_url` in step 1. Payment Service POSTs here when status chang
 }
 ```
 
-**Status values:** `PENDING`, `PROCESSING`, `CAPTURED`, `FAILED`, `CANCELLED`, `REFUNDED`, `REFUND_FAILED`
+**Status values:** `PENDING`, `PROCESSING`, `AUTHORIZED`, `CAPTURED`, `SETTLED`, `FAILED`, `CANCELLED`, `REFUND_PENDING`, `PARTIALLY_REFUNDED`, `REFUNDED`, `REFUND_FAILED`, `DISPUTED`
 
 **Your handler must:**
 - Return `200 OK` within 10 seconds

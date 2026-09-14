@@ -1,8 +1,15 @@
-# Full local stack: Postgres, Valkey, and the payment-service (single process
-# running API, relay, and background jobs).
+# Full local stack: Postgres, Valkey, Floci (SNS/SQS/S3), Redpanda (Kafka),
+# MailHog (SMTP), MockServer (webhook/callback tests), and the payment-service
+# (single process running API, relay, and background jobs).
 #
 # Usage:
 #   docker compose up --build
+#
+# The payment-service publishes outbox events to Floci's SNS topic
+# `payment-events`, which fans out to the `payment-events-consumer` SQS queue
+# (both created by the one-shot `floci-init` service). Inspect events with:
+#   aws sqs receive-message --queue-url http://localhost:4566/000000000000/payment-events-consumer \
+#     --endpoint-url http://localhost:4566
 
 services:
   postgres:
@@ -50,23 +57,113 @@ services:
     entrypoint: ["bash", "-c"]
     command: ["psql postgres://payment:payment@postgres:5432/payment_dev -f /seed.sql"]
 
-  # payment-service:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "8080:8080"
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     valkey:
-  #       condition: service_healthy
-  #     db-seed:
-  #       condition: service_completed_successfully
-  #   volumes:
-  #     - ./config.yaml:/config.yaml:ro
-  #   environment:
-  #     # Only container-specific overrides; everything else comes from config.yaml.
-  #     DATABASE_PRIMARY_HOST: postgres
-  #     DATABASE_PASSWORD: payment
-  #     VALKEY_ADDRS: valkey:6379
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"
+    environment:
+      FLOCI_HOSTNAME: floci
+      FLOCI_STORAGE_MODE: persistent
+    volumes:
+      - floci-data:/var/lib/floci
+
+  # One-shot bootstrap: creates the SNS topic + SQS queue + subscription so the
+  # payment-service can publish outbox events immediately. Safe to re-run.
+  floci-init:
+    image: amazon/aws-cli:latest
+    depends_on:
+      floci:
+        condition: service_started
+    environment:
+      AWS_ENDPOINT_URL: http://floci:4566
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "floci-init: creating SNS topic payment-events..."
+        TOPIC_ARN=$$(aws sns create-topic --name payment-events --query TopicArn --output text)
+        echo "floci-init: topic=$${TOPIC_ARN}"
+        QUEUE_URL=$$(aws sqs create-queue --queue-name payment-events-consumer --query QueueUrl --output text)
+        QUEUE_ARN=$$(aws sqs get-queue-attributes --queue-url $${QUEUE_URL} --attribute-names QueueArn --query Attributes.QueueArn --output text)
+        aws sns subscribe --topic-arn $${TOPIC_ARN} --protocol sqs --notification-endpoint $${QUEUE_ARN} >/dev/null
+        echo "floci-init: queue=$${QUEUE_URL} subscribed to $${TOPIC_ARN}"
+
+  redpanda:
+    image: redpandata/redpanda:latest
+    ports:
+      - "9092:9092" # Kafka client (PLAINTEXT_HOST)
+      - "9644:9644" # admin API
+      - "8081:8081" # schema registry
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - "512M"
+      - --reserve-memory
+      - "0M"
+      - --node-id
+      - "0"
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:29092,PLAINTEXT_HOST://localhost:9092
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/29092' >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025" # SMTP
+      - "8025:8025" # web UI
+
+  mockserver:
+    image: mockserver/mockserver:latest
+    ports:
+      - "1080:1080" # proxy/expectations for webhook & callback tests
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      db-seed:
+        condition: service_completed_successfully
+      floci-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      # Only container-specific overrides; everything else comes from config.yaml.
+      DATABASE_PRIMARY_HOST: postgres
+      DATABASE_PASSWORD: payment
+      VALKEY_ADDRS: valkey:6379
+      SERVICE_TOKENS: test-token=11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222
+      OPS_TOKENS: ops-token
+      OUTBOX_PUBLISHER: sns
+      SNS_PAYMENT_EVENTS_TOPIC: arn:aws:sns:us-east-1:000000000000:payment-events
+      AWS_ENDPOINT_URL: http://floci:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SMTP_HOST: mailhog
+      SMTP_PORT: "1025"
+      SMTP_FROM: payments@example.com
+
+volumes:
+  floci-data:

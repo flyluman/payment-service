@@ -1,19 +1,40 @@
-git
-.gitignore
 .git
+.gitignore
+.gitattributes
 .dockerignore
 Dockerfile
 docker-compose.yml
+
+# Editor/IDE
 .vscode
 .idea
+*.swp
+*.swo
+*~
+
+# Docs & tooling not needed at build time
 *.md
-.DS_Store
-.env
-.env.local
+docs/
+postman/
+seed/
+migrations/
 test/
 tools/
+
+# Local configuration & secrets
+.env
+.env.*
+config.yaml
+config.local.yaml
+*.pem
+*.key
+
+# Go artifacts
 vendor/
 *.test
+*.out
 *.cover
-.github
-.gitattributes
+coverage.*
+*.prof
+*.log
+bin/

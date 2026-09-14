@@ -49,7 +49,7 @@ The service runs as a **single process** (`cmd/server`) that spawns all three co
 |---|---|
 | **API server** | HTTP server: create/process payments, refunds, cancellations, disputes, dead letters, receive gateway webhooks, health checks, reconciliation management |
 | **Outbox relay** | Polls the transactional outbox and publishes domain events downstream |
-| **Background jobs** | Runs `partition_manager`, `lease_expiry`, `gateway_metrics`, `tenant_webhook`, `notification`, and `reconciliation` on tickers (immediate first run, then periodic) |
+| **Background jobs** | Runs `partition_manager`, `lease_expiry`, `gateway_metrics`, `tenant_webhook`, `notification`, `refund_reaper`, and `reconciliation` on tickers (immediate first run, then periodic) |
 
 A single `SIGINT` / `SIGTERM` propagates through a shared context so all three shut down together. On shutdown, the process waits up to 15 seconds for in-flight work to drain before exiting.
 
@@ -234,6 +234,7 @@ stateDiagram-v2
     AUTHORIZED --> CAPTURED
     AUTHORIZED --> FAILED
     AUTHORIZED --> CANCELLED
+    AUTHORIZED --> PROCESSING
 
     CAPTURED --> SETTLED
     CAPTURED --> REFUND_PENDING
@@ -275,6 +276,8 @@ Notable rules baked into `transaction.go` / `state_machine.go`:
 
 - `PENDING`, `PROCESSING`, `AUTHORIZED`, `CAPTURED`, `SETTLED`, `FAILED`, `CANCELLED`, `REFUND_PENDING`, `PARTIALLY_REFUNDED`, `REFUNDED`, `REFUND_FAILED`, `DISPUTED` are the 12 statuses (`AllStatuses()`).
 - `IsTerminal()` is true for `SETTLED`, `CANCELLED`, `REFUNDED`, `REFUND_FAILED` — note that `SETTLED` is terminal for the *payment* even though a refund can still be attached afterward.
+- `AUTHORIZED → PROCESSING` is valid: if a manual `capture` returns an ambiguous/timeout outcome, the transaction is left in `PROCESSING` (lease intact) so the lease-expiry reaper reconciles it via a read-only `CheckStatus` — it is never re-attempted blindly.
+- `PROCESSING → CANCELLED` is valid (enables cancelling an in-flight payment).
 - A transaction carries `Version` for **optimistic locking**: `UpdateStatus` fails with `ErrVersionConflict` if the stored version doesn't match, and `ErrNotFound` (a distinct case) if the row simply doesn't exist.
 - `AttemptedGateway` vs `ActualGateway` are tracked separately so a fallback to a different gateway is visible (`HasGatewayDiscrepancy()`).
 
@@ -617,6 +620,38 @@ Design points that matter operationally:
 - **Dead-lettering**: once attempts are exhausted, `MarkExhausted` moves the event to `outbox_dead_letters` in the same transaction it removes/marks the original — replayable later via `ReplayDeadLetter`, which re-enqueues a **new** event ID rather than resurrecting the old one.
 - **Shard-aware polling**: `PollPending(shardMin, shardMax, ...)` lets multiple relay workers split the keyspace so they don't compete for the same rows, without needing external partitioning of workers.
 - **Weekly partitioning**: `outbox_events` itself is a partitioned table (see §18) so old, fully-published partitions can be detached and dropped instead of bloating one ever-growing table.
+
+### Event types
+
+| Event | Emitted on | Aggregated by |
+|---|---|---|
+| `TRANSACTION_CREATED` | Payment created (`PENDING`) | transaction |
+| `GATEWAY_INITIATE` | Payment created — fallback retry for `InitiatePayment` | transaction |
+| `TRANSACTION_AUTHORIZED` | Manual `authorize` reached `AUTHORIZED` | transaction |
+| `TRANSACTION_CAPTURED` | Payment confirmed (`CAPTURED`) | transaction |
+| `TRANSACTION_SETTLED` | Manual `settle` reached `SETTLED` | transaction |
+| `TRANSACTION_FAILED` | Payment failed (`FAILED`) | transaction |
+| `TRANSACTION_CANCELLED` | Payment cancelled (`CANCELLED`) | transaction |
+| `REFUND_INITIATED` | Refund requested (async refund flow) | refund |
+| `REFUND_SUCCEEDED` | Refund completed / a `CANCELLED` cancel-resolution | refund |
+| `REFUND_FAILED` | Refund terminal failure | refund |
+| `TRANSACTION_CALLBACK` | Terminal transition — invokes the tenant `callback_url` | transaction |
+| `DISPUTE_CREATED` / `DISPUTE_UPDATED` | Dispute opened / status changed | dispute |
+
+Status → event mapping is centralized in `ports.EventTypeForTransactionStatus(status) (string, bool)`. Statuses with no distinct downstream event (`PENDING`, `PROCESSING`, `REFUND_PENDING`, `PARTIALLY_REFUNDED`, `REFUND_FAILED`, `DISPUTED`) return `ok=false`, and callers **skip publishing** rather than emit a bogus `TRANSACTION_FAILED`.
+
+### Relay routing
+
+The relay builds a `outbox.Router` whose routes run **in order**, side effects first, then a `*` catch-all that fans out to the configured publisher (SNS or log):
+
+```go
+outbox.Route{EventType: ports.EventTypeTransactionCallback, Handler: cbDispatcher},
+outbox.Route{EventType: ports.EventTypeGatewayInitiate, Handler: initiatorHandler},
+outbox.Route{EventType: ports.EventTypeRefundInitiated, Handler: refundInitHandler},
+outbox.Route{EventType: "*", Handler: baseHandler},
+```
+
+Ordering matters: specific routes run before the wildcard, so an event that a side-effect handler consumes (e.g. `TRANSACTION_CALLBACK`) is **not** re-fanned-out to SNS on retry. The default publisher is `log` (events logged, not delivered); set `OUTBOX_PUBLISHER=sns` for real delivery (see §31 for local SNS via Floci).
 
 ---
 
@@ -1241,6 +1276,8 @@ Amount mismatches within configurable thresholds (basis points + absolute cap) a
 | `GET` | `/api/v1/reconciliation/jobs/{id}/entries` | service/ops token | List reconciliation entries (filter by `?mismatch_type=`, `?resolution_status=`) |
 | `POST` | `/api/v1/reconciliation/jobs/{id}/entries/{entry_id}/resolve` | service/ops token | Mark a reconciliation entry as resolved |
 
+**Manual capture flow** (`authorize` → `capture` → `settle`, ops tokens): each call acquires the processing lease (`TryAcquireDirect`) before invoking the gateway, so concurrent calls cannot double-fire; a lease loser reloads the current transaction and returns it. Terminal outcomes route through the same `finalize` machinery as the initiate flow — they emit `TRANSACTION_AUTHORIZED` / `TRANSACTION_CAPTURED` / `TRANSACTION_SETTLED` outbox events plus callback, notification, tenant webhook, audit, and SSE. An ambiguous or timeout outcome keeps the transaction in `PROCESSING` (with lease timestamps) so the lease-expiry reaper reconciles it via a read-only `CheckStatus`. `authorize` requires the gateway to be in manual-capture mode (otherwise `capture_mode` is auto and the transition is rejected).
+
 ### Transaction List Filters
 
 `GET /api/v1/payments` supports the following query parameters:
@@ -1460,6 +1497,11 @@ All configuration comes from `config.yaml` with environment variable overrides, 
 | Observability | `OTLP_PROTOCOL` | `observability.otlp_protocol` | — | |
 | SNS | `SNS_PAYMENT_EVENTS_TOPIC` | `sns.payment_events_topic` | — | |
 | AWS | `AWS_REGION` | `aws.region` | — | |
+| AWS | `AWS_ENDPOINT_URL` | *(not bound — read by the AWS SDK)* | — | Point AWS SDK calls at Floci (e.g. `http://localhost:4566`) for local SNS/SQS testing |
+| AWS | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | *(not bound — read by the AWS SDK)* | — | Any value works with Floci (`test`/`test`) |
+| Notification | `SMTP_HOST` / `SMTP_PORT` | `notification.smtp.host/port` | — | Use `localhost` / `1025` for MailHog |
+| Notification | `SMTP_USERNAME` / `SMTP_PASSWORD` | `notification.smtp.username/password` | — | Empty for MailHog |
+| Notification | `SMTP_FROM` | `notification.smtp.from` | — | Sender address |
 | Jobs | `LEASE_EXPIRY_INTERVAL_SECONDS` | `jobs.lease_expiry_interval_sec` | `60` | |
 | Jobs | `LEASE_REAPER_IDEMPOTENCY_TIMEOUT_SEC` | `jobs.idempotency_processing_timeout_sec` | `300` | |
 | Jobs | `PARTITION_WEEKS_AHEAD` | `jobs.partition_weeks_ahead` | `2` | |
@@ -1472,17 +1514,67 @@ All configuration comes from `config.yaml` with environment variable overrides, 
 ## 31. Running Locally
 
 ```bash
-# Start Postgres + Valkey for local/integration use
+# Full local stack: Postgres, Valkey, Floci (SNS/SQS/S3), Redpanda (Kafka),
+# MailHog (SMTP), and the payment-service itself (built via the multi-stage Dockerfile)
+docker compose up --build
+
+# ...or just the infra, then run the service from source
 docker compose up -d postgres valkey
 
-# Run the service — starts API, relay, and background jobs in one process
-# (see §30 for required env vars; .env file in working dir is auto-loaded)
 SERVICE_TOKENS=test-token=11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222 \
   go run ./cmd/server
-
-# Or run the full stack via Docker Compose (builds the binary, starts infra)
-docker compose up --build
 ```
+
+The `payment-service` compose service builds the **multi-stage Dockerfile** (`golang:alpine` build stage → stripped static binary → `scratch` runtime with CA certs and a non-root user). `config.yaml` is mounted read-only at `/app/config.yaml` — the `CONFIG_PATH` env var is broken, so the config file must be in the working directory. Overrides for the compose-run service (DB host, Valkey, SNS publisher, SMTP) come via environment in `docker-compose.yml`.
+
+### Docker image
+
+```bash
+# Single-stage builds and multi-arch export work out of the box:
+docker build -t payment-service .
+
+# The runtime image is ~15MB: static binary, CA bundle, nothing else.
+# Run it against the local stack (config must be mounted in /app):
+docker run --rm -p 8080:8080 \
+  --env-file .env \
+  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  payment-service
+```
+
+### Local AWS / event testing with Floci
+
+[Floci](https://floci.io) (`floci/floci:latest`) emulates SNS/SQS/S3 and more at `http://localhost:4566` — no account or auth token required. Point the AWS SDK at it and watch outbox events fan out from SNS to an SQS queue:
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+export AWS_DEFAULT_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+
+# Create the topic + an SQS queue subscribed to it (one-time setup)
+TOPIC=$(aws sns create-topic --name payment-events --query TopicArn --output text)
+QUEUE_URL=$(aws sqs create-queue --queue-name payment-events-consumer \
+  --query QueueUrl --output text --endpoint-url $AWS_ENDPOINT_URL)
+QUEUE_ARN=$(aws sqs get-queue-attributes --queue-url $QUEUE_URL \
+  --attribute-names QueueArn --query Attributes.QueueArn --output text --endpoint-url $AWS_ENDPOINT_URL)
+aws sns subscribe --topic-arn $TOPIC --protocol sqs --notification-endpoint $QUEUE_ARN
+
+# Run the service publishing to Floci's SNS
+OUTBOX_PUBLISHER=sns \
+SNS_PAYMENT_EVENTS_TOPIC=$TOPIC \
+AWS_ENDPOINT_URL=http://localhost:4566 \
+AWS_REGION=us-east-1 \
+  go run ./cmd/server
+
+# Trigger a payment, then inspect the event
+aws sqs receive-message --queue-url $QUEUE_URL --endpoint-url $AWS_ENDPOINT_URL
+```
+
+Notes:
+- With `OUTBOX_PUBLISHER` unset the relay uses a `log` publisher (events logged, not delivered) — fine for unit-style local work.
+- **Redpanda** (`redpandadata/redpanda:latest`, Kafka-compatible) is available as a candidate event bus if you want to replace SNS fan-out; no Kafka adapter exists in the codebase today.
+- **MailHog** (`mailhog/mailhog:latest`) captures SMTP mail at `http://localhost:8025`; point `SMTP_HOST` at its SMTP port — `mailhog` when running inside the compose network, `localhost:1025` when running the service from the host — to inspect notification emails.
+- **MockServer** (`mockserver/mockserver:latest`, :1080) can stand in for a tenant webhook endpoint or gateway callback receiver while developing against the tenant-webhook worker.
 
 ### Seed Data
 
