@@ -7,10 +7,22 @@ type stripePaymentIntent struct {
 	Status           string            `json:"status"`
 	Amount           int64             `json:"amount"`
 	Currency         string            `json:"currency"`
+	ClientSecret     string            `json:"client_secret"`
 	Metadata         map[string]string `json:"metadata"`
 	LastPaymentError *stripeError      `json:"last_payment_error"`
 	LatestCharge     json.RawMessage   `json:"latest_charge"`
 	Charges          *stripeChargeList `json:"charges"`
+	NextAction       *stripeNextAction `json:"next_action"`
+}
+
+type stripeNextAction struct {
+	Type        string `json:"type"`
+	RedirectToURL *struct {
+		URL string `json:"url"`
+	} `json:"redirect_to_url,omitempty"`
+	UseStripeSDK *struct {
+		StripeJS *struct{} `json:"stripe_js"`
+	} `json:"use_stripe_sdk,omitempty"`
 }
 
 type stripeChargeList struct {

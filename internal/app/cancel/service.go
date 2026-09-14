@@ -7,9 +7,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/app/idempotency"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type Outcome string
@@ -26,13 +26,14 @@ type Result struct {
 }
 
 type TransactionStore interface {
-	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error)
+	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
 	SetCancelIntent(ctx context.Context, id uuid.UUID, by transaction.Actor, via transaction.CancelVia) (bool, error)
 }
 
 type Service struct {
 	txns    TransactionStore
 	idem    *idempotency.Guard
+	audit   ports.AuditLogStore
 	log     ports.Logger
 	metrics ports.MetricRecorder
 }
@@ -42,9 +43,11 @@ func NewService(txns TransactionStore, log ports.Logger, metrics ports.MetricRec
 }
 
 func (s *Service) SetIdempotency(g *idempotency.Guard) { s.idem = g }
+func (s *Service) SetAuditLogStore(a ports.AuditLogStore) { s.audit = a }
 
 type CancelInput struct {
 	TransactionID  uuid.UUID
+	TenantID       uuid.UUID
 	By             transaction.Actor
 	Via            transaction.CancelVia
 	IdempotencyKey string
@@ -104,6 +107,10 @@ func (s *Service) cancel(ctx context.Context, in CancelInput) (Outcome, transact
 		return "", "", fmt.Errorf("cancel: load transaction %s: %w", in.TransactionID, err)
 	}
 
+	if in.TenantID != uuid.Nil && txn.TenantID != in.TenantID {
+		return "", "", fmt.Errorf("cancel: tenant mismatch for %s", in.TransactionID)
+	}
+
 	if txn.Status.IsTerminal() {
 		return OutcomeAlreadyTerminal, txn.Status, nil
 	}
@@ -120,6 +127,16 @@ func (s *Service) cancel(ctx context.Context, in CancelInput) (Outcome, transact
 			ports.FieldTransactionID: in.TransactionID.String(),
 			ports.FieldActor:         string(in.By),
 		})
+		if s.audit != nil {
+			_ = s.audit.WriteEntry(ctx, &ports.AuditEntry{
+				TransactionID: &in.TransactionID,
+				EventType:     ports.AuditEventTypeOpsAction,
+				Actor:         string(in.By),
+				PreviousState: string(txn.Status),
+				NewState:      string(txn.Status),
+				Reason:        "cancel_intent_set",
+			})
+		}
 	}
 
 	return OutcomeRequested, txn.Status, nil

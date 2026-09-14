@@ -128,7 +128,7 @@ func TestResponseCache_MerchantScopedKeys(t *testing.T) {
 	for _, m := range []string{"merchant-a", "merchant-b"} {
 		req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{"a":1}`))
 		req.Header.Set("Idempotency-Key", "shared-key")
-		ctx := context.WithValue(req.Context(), merchantIDKey, m)
+		ctx := context.WithValue(req.Context(), tenantIDKey, m)
 		h.ServeHTTP(httptest.NewRecorder(), req.WithContext(ctx))
 	}
 	if calls != 2 {

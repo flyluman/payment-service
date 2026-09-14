@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-func authedHandler(captured *Principal, merchant *string) http.Handler {
+func authedHandler(captured *Principal, tenant *string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p, ok := PrincipalFromContext(r.Context()); ok {
 			*captured = p
 		}
-		*merchant = MerchantIDFromContext(r.Context())
+		*tenant = TenantIDFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	})
 }
@@ -103,4 +103,6 @@ func TestAuth_OpsTokenNotValidAsService(t *testing.T) {
 		t.Fatalf("ops token must not authenticate as a service token, got %d", rec.Code)
 	}
 }
+
+
 

@@ -5,11 +5,14 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
-	"time"
 
-	appwebhook "samarth/payment-service/internal/app/webhook"
-	"samarth/payment-service/internal/ports"
+	"github.com/google/uuid"
+
+	"github.com/crownroutes/payment-service/internal/api/middleware"
+	"github.com/crownroutes/payment-service/internal/domain/gateway"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	appwebhook "github.com/crownroutes/payment-service/internal/app/webhook"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type WebhookProcessor interface {
@@ -18,64 +21,88 @@ type WebhookProcessor interface {
 type WebhookParserResolver interface {
 	WebhookParser(gatewayID string) (ports.GatewayWebhookParser, bool)
 }
-type SecretProvider interface {
-	WebhookSecret(ctx context.Context, gatewayID string) (string, error)
+type WebhookTransactionGetter interface {
+	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
 }
-type WebhookPolicyProvider interface {
-	WebhookPolicy(ctx context.Context, gatewayID string) (replayWindowSec, clockSkewSec int, err error)
+type WebhookTenantConfigGetter interface {
+	Get(ctx context.Context, tenantID uuid.UUID, gatewayID string) (*gateway.TenantGatewayConfig, error)
 }
 
 type WebhookHandler struct {
 	processor WebhookProcessor
 	parsers   WebhookParserResolver
-	secrets   SecretProvider
-	policy    WebhookPolicyProvider
+	txns      WebhookTransactionGetter
+	tenants   WebhookTenantConfigGetter
 	log       ports.Logger
 }
 
-func NewWebhookHandler(processor WebhookProcessor, parsers WebhookParserResolver, secrets SecretProvider, policy WebhookPolicyProvider, log ports.Logger) *WebhookHandler {
-	return &WebhookHandler{processor: processor, parsers: parsers, secrets: secrets, policy: policy, log: log}
+func NewWebhookHandler(processor WebhookProcessor, parsers WebhookParserResolver, txns WebhookTransactionGetter, tenants WebhookTenantConfigGetter, log ports.Logger) *WebhookHandler {
+	return &WebhookHandler{processor: processor, parsers: parsers, txns: txns, tenants: tenants, log: log}
 }
 
 func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	log := h.log
+	if ctxLog := middleware.LoggerFromContext(r.Context()); ctxLog != nil {
+		log = ctxLog
+	}
+
 	gatewayID := r.PathValue("gateway_id")
+
+	txnIDStr := r.URL.Query().Get("transaction_id")
+	if txnIDStr == "" {
+		writeError(w, r, http.StatusBadRequest, "missing_transaction_id", "transaction_id query parameter is required")
+		return
+	}
+	txnID, err := uuid.Parse(txnIDStr)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_transaction_id", "transaction_id must be a valid UUID")
+		return
+	}
+
+	txn, err := h.txns.GetByID(r.Context(), txnID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "transaction_not_found", "transaction not found")
+		return
+	}
+
+	rawCfg, err := h.tenants.Get(r.Context(), txn.TenantID, gatewayID)
+	if err != nil {
+		log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{ports.FieldGatewayID: gatewayID, "reason": "tenant_config_not_found"})
+		writeError(w, r, http.StatusUnauthorized, "unknown_tenant", "no tenant config for gateway")
+		return
+	}
+
+	secret, err := gateway.ExtractWebhookSecret(gateway.Provider(rawCfg.Provider), rawCfg.Config)
+	if err != nil {
+		log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{ports.FieldGatewayID: gatewayID, "reason": "extract_secret"})
+		writeError(w, r, http.StatusUnauthorized, "invalid_config", "could not extract webhook secret")
+		return
+	}
 
 	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", "could not read webhook body")
+		writeError(w, r, http.StatusBadRequest, "invalid_body", "could not read webhook body")
 		return
 	}
 
 	parser, ok := h.parsers.WebhookParser(gatewayID)
 	if !ok {
-		writeError(w, http.StatusNotFound, "unknown_gateway", "no webhook parser for gateway")
-		return
-	}
-
-	secret, err := h.secrets.WebhookSecret(r.Context(), gatewayID)
-	if err != nil || secret == "" {
-		writeError(w, http.StatusUnauthorized, "unknown_gateway", "no webhook secret for gateway")
+		writeError(w, r, http.StatusNotFound, "unknown_gateway", "no webhook parser for gateway")
 		return
 	}
 
 	ev, err := parser.ParseWebhook(rawBody, headerMap(r), secret)
 	if errors.Is(err, ports.ErrWebhookSignature) {
-		h.log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{ports.FieldGatewayID: gatewayID})
-		writeError(w, http.StatusUnauthorized, "invalid_signature", "webhook signature verification failed")
+		log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{ports.FieldGatewayID: gatewayID})
+		writeError(w, r, http.StatusUnauthorized, "invalid_signature", "webhook signature verification failed")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_webhook", "could not parse webhook payload")
+		writeError(w, r, http.StatusBadRequest, "invalid_webhook", "could not parse webhook payload")
 		return
 	}
 	if ev.EventID == "" || ev.GatewayReferenceID == "" {
-		writeError(w, http.StatusBadRequest, "invalid_webhook", "event id and reference are required")
-		return
-	}
-
-	if ok, code, msg := h.checkTimestamp(r, gatewayID); !ok {
-		h.log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{ports.FieldGatewayID: gatewayID, "reason": code})
-		writeError(w, http.StatusBadRequest, code, msg)
+		writeError(w, r, http.StatusBadRequest, "invalid_webhook", "event id and reference are required")
 		return
 	}
 
@@ -85,46 +112,15 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		Status:             normalizeStatus(ev.Status),
 	}, rawBody)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "webhook_processing_failed", "could not process webhook")
+		writeError(w, r, http.StatusInternalServerError, "webhook_processing_failed", "could not process webhook")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"received":    true,
-		"duplicate":   outcome.Duplicate,
-		"resolved":    outcome.Resolved,
+	writeJSON(w, r, http.StatusOK, map[string]any{
+		"duplicate":  outcome.Duplicate,
+		"resolved":  outcome.Resolved,
 		"unknown_txn": outcome.UnknownTxn,
 	})
-}
-
-func (h *WebhookHandler) checkTimestamp(r *http.Request, gatewayID string) (ok bool, code, msg string) {
-	if h.policy == nil {
-		return true, "", ""
-	}
-	tsRaw := r.Header.Get("X-Webhook-Timestamp")
-	if tsRaw == "" {
-		return true, "", ""
-	}
-
-	ts, err := strconv.ParseInt(tsRaw, 10, 64)
-	if err != nil {
-		return false, "invalid_timestamp", "X-Webhook-Timestamp must be a unix timestamp"
-	}
-
-	window, skew, err := h.policy.WebhookPolicy(r.Context(), gatewayID)
-	if err != nil {
-		return false, "policy_unavailable", "could not resolve webhook policy"
-	}
-
-	tolerance := int64(window + skew)
-	diff := time.Now().Unix() - ts
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > tolerance {
-		return false, "stale_webhook", "webhook timestamp outside the accepted window"
-	}
-	return true, "", ""
 }
 
 func headerMap(r *http.Request) map[string]string {

@@ -60,7 +60,7 @@ const (
 
 	LogEventRateLimitRejected = "rate_limit.rejected"
 	LogEventRateLimitFallback = "rate_limit.fallback_activated"
-	LogEventRateLimitRestored = "rate_limit.redis_restored"
+	LogEventRateLimitRestored = "rate_limit.valkey_restored"
 
 	LogEventWebhookInboundReceived   = "webhook.inbound_received"
 	LogEventWebhookInboundDuplicate  = "webhook.inbound_duplicate"
@@ -76,9 +76,12 @@ const (
 
 const (
 	FieldTraceID        = "trace_id"
+	FieldRequestID      = "request_id"
 	FieldSpanID         = "span_id"
 	FieldTransactionID  = "transaction_id"
-	FieldMerchantID     = "merchant_id"
+	FieldTenantID       = "tenant_id"
+	FieldUserID         = "user_id"
+
 	FieldPaymentMethod  = "payment_method"
 	FieldGatewayID      = "gateway_id"
 	FieldEnvironment    = "environment"

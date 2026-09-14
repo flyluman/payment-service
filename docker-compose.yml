@@ -1,0 +1,72 @@
+# Full local stack: Postgres, Valkey, and the payment-service (single process
+# running API, relay, and background jobs).
+#
+# Usage:
+#   docker compose up --build
+
+services:
+  postgres:
+    image: postgres:latest
+    environment:
+      POSTGRES_DB: payment_dev
+      POSTGRES_USER: payment
+      POSTGRES_PASSWORD: payment
+    ports:
+      - "5432:5432"
+    command: ["postgres", "-c", "wal_level=logical"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payment -d payment_dev"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  valkey:
+    image: valkey/valkey:latest
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  db-migrate:
+    image: migrate/migrate:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["migrate -path /migrations -database 'postgres://payment:payment@postgres:5432/payment_dev?sslmode=disable' up"]
+
+  db-seed:
+    image: postgres:latest
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./seed/seed.sql:/seed.sql
+    entrypoint: ["bash", "-c"]
+    command: ["psql postgres://payment:payment@postgres:5432/payment_dev -f /seed.sql"]
+
+  # payment-service:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "8080:8080"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     valkey:
+  #       condition: service_healthy
+  #     db-seed:
+  #       condition: service_completed_successfully
+  #   volumes:
+  #     - ./config.yaml:/config.yaml:ro
+  #   environment:
+  #     # Only container-specific overrides; everything else comes from config.yaml.
+  #     DATABASE_PRIMARY_HOST: postgres
+  #     DATABASE_PASSWORD: payment
+  #     VALKEY_ADDRS: valkey:6379

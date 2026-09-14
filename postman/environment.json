@@ -1,0 +1,58 @@
+{
+  "id": "payment-service-dev",
+  "name": "Payment Service (Dev)",
+  "values": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080",
+      "enabled": true
+    },
+    {
+      "key": "service_token",
+      "value": "dev-service-token",
+      "enabled": true,
+      "type": "secret"
+    },
+    {
+      "key": "ops_token",
+      "value": "dev-ops-token",
+      "enabled": true,
+      "type": "secret"
+    },
+    {
+      "key": "tenant_id",
+      "value": "00000000-0000-0000-0000-000000000001",
+      "enabled": true
+    },
+    {
+      "key": "transaction_id",
+      "value": "",
+      "enabled": true,
+      "description": "Auto-populated after Create Payment"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "enabled": true,
+      "description": "Auto-populated after Create Payment"
+    },
+    {
+      "key": "gateway_id",
+      "value": "fib",
+      "enabled": true
+    },
+    {
+      "key": "dispute_id",
+      "value": "",
+      "enabled": true,
+      "description": "Set manually after creating/discovering a dispute"
+    },
+    {
+      "key": "dead_letter_id",
+      "value": "",
+      "enabled": true,
+      "description": "Set manually after listing dead letters"
+    }
+  ],
+  "_postman_variable_scope": "environment"
+}

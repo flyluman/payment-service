@@ -7,17 +7,17 @@ import (
 
 	"github.com/google/uuid"
 
-	domainrefund "samarth/payment-service/internal/domain/refund"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	domainrefund "github.com/crownroutes/payment-service/internal/domain/refund"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type fakeTxns struct {
-	txn *transaction.Transaction
+	txn *transaction.Txn
 	err error
 }
 
-func (f *fakeTxns) GetByID(context.Context, uuid.UUID) (*transaction.Transaction, error) {
+func (f *fakeTxns) GetByID(context.Context, uuid.UUID) (*transaction.Txn, error) {
 	return f.txn, f.err
 }
 
@@ -91,8 +91,8 @@ func (noopMetrics) Increment(string, map[string]string)          {}
 func (noopMetrics) Histogram(string, float64, map[string]string) {}
 func (noopMetrics) Gauge(string, float64, map[string]string)     {}
 
-func succeededTxn(amount int64) *transaction.Transaction {
-	t, _ := transaction.New(uuid.New(), amount, "INR", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "o", nil, 30)
+func succeededTxn(amount int64) *transaction.Txn {
+	t, _ := transaction.New(uuid.New(), uuid.New(), amount, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "o", nil, 30)
 	t.Status = transaction.StatusSucceeded
 	return t
 }

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 func stripeSig(secret string, ts int64, body []byte) string {

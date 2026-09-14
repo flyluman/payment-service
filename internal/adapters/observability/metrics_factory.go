@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"samarth/payment-service/config"
-	"samarth/payment-service/internal/adapters/observability/otel"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/config"
+	"github.com/crownroutes/payment-service/internal/adapters/observability/otel"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type MetricsCloser func(context.Context) error

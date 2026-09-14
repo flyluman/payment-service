@@ -16,21 +16,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"samarth/payment-service/internal/adapters/gateways"
-	"samarth/payment-service/internal/adapters/gateways/stripe"
-	"samarth/payment-service/internal/adapters/observability"
-	"samarth/payment-service/internal/adapters/postgres"
-	appcancel "samarth/payment-service/internal/app/cancel"
-	apprefund "samarth/payment-service/internal/app/refund"
-	domainrefund "samarth/payment-service/internal/domain/refund"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
-	"samarth/payment-service/internal/testsupport"
+	"github.com/crownroutes/payment-service/internal/adapters/gateways"
+	"github.com/crownroutes/payment-service/internal/adapters/gateways/stripe"
+	"github.com/crownroutes/payment-service/internal/adapters/observability"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
+	appcancel "github.com/crownroutes/payment-service/internal/app/cancel"
+	apprefund "github.com/crownroutes/payment-service/internal/app/refund"
+	domainrefund "github.com/crownroutes/payment-service/internal/domain/refund"
+	"github.com/crownroutes/payment-service/internal/domain/payment"
+	"github.com/crownroutes/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
 func refundService(pg *testsupport.PG, registry apprefund.GatewayRegistry) *apprefund.Service {
 	return apprefund.NewService(
-		postgres.NewTransactionRepository(pg.DB, pg.Q),
+		postgres.NewPaymentRepository(pg.DB, pg.Q),
 		postgres.NewRefundRepository(pg.DB, pg.Q),
 		postgres.NewOutboxWriter(pg.DB, pg.Q),
 		postgres.NewTransactor(pg.DB),
@@ -40,12 +40,12 @@ func refundService(pg *testsupport.PG, registry apprefund.GatewayRegistry) *appr
 	)
 }
 
-func seedTransaction(t *testing.T, pg *testsupport.PG, status transaction.Status, amount int64) *transaction.Transaction {
+func seedTransaction(t *testing.T, pg *testsupport.PG, status payment.Status, amount int64) *payment.Payment {
 	t.Helper()
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewPaymentRepository(pg.DB, pg.Q)
 	tr := postgres.NewTransactor(pg.DB)
 
-	txn, err := transaction.New(uuid.New(), amount, "INR", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "o", nil, 30)
+	txn, err := payment.New(uuid.New(), amount, "BDT", payment.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "o", nil, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestRefund_ConcurrentNoOverRefund(t *testing.T) {
 	pg.Truncate(t, "transactions", "refunds", "outbox_events")
 	ctx := context.Background()
 
-	parent := seedTransaction(t, pg, transaction.StatusSucceeded, 100000)
+	parent := seedTransaction(t, pg, payment.StatusSucceeded, 100000)
 
 	svc := refundService(pg, gateways.NewRegistry())
 
@@ -113,11 +113,11 @@ func TestRefund_FullFlowEndToEnd(t *testing.T) {
 	pg.Truncate(t, "transactions", "refunds", "outbox_events")
 	ctx := context.Background()
 
-	parent := seedTransaction(t, pg, transaction.StatusSucceeded, 100000)
+	parent := seedTransaction(t, pg, payment.StatusSucceeded, 100000)
 	parent.GatewayReferenceID = "pi_ref"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"re_1","status":"succeeded","amount":40000,"currency":"inr"}`))
+		_, _ = w.Write([]byte(`{"id":"re_1","status":"succeeded","amount":40000,"currency":"bdt"}`))
 	}))
 	defer srv.Close()
 
@@ -172,8 +172,8 @@ func TestCancel_ConcurrentSingleIntent(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	txn := seedTransaction(t, pg, transaction.StatusProcessing, 150000)
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	txn := seedTransaction(t, pg, payment.StatusProcessing, 150000)
+	repo := postgres.NewPaymentRepository(pg.DB, pg.Q)
 
 	const goroutines = 16
 	var winners int64
@@ -182,7 +182,7 @@ func TestCancel_ConcurrentSingleIntent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok, err := repo.SetCancelIntent(ctx, txn.ID, transaction.ActorMerchant, transaction.CancelViaAPI)
+			ok, err := repo.SetCancelIntent(ctx, txn.ID, payment.ActorTenant, payment.CancelViaAPI)
 			if err != nil {
 				t.Errorf("set cancel intent: %v", err)
 				return
@@ -204,10 +204,10 @@ func TestCancelService_Outcomes(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	svc := appcancel.NewService(postgres.NewTransactionRepository(pg.DB, pg.Q), discardLogger(), observability.NewNoopMetrics())
+	svc := appcancel.NewService(postgres.NewPaymentRepository(pg.DB, pg.Q), discardLogger(), observability.NewNoopMetrics())
 
-	processing := seedTransaction(t, pg, transaction.StatusProcessing, 1000)
-	res, err := svc.Cancel(ctx, appcancel.CancelInput{TransactionID: processing.ID, By: transaction.ActorOps, Via: transaction.CancelViaOpsTool})
+	processing := seedTransaction(t, pg, payment.StatusProcessing, 1000)
+	res, err := svc.Cancel(ctx, appcancel.CancelInput{TransactionID: processing.ID, By: payment.ActorOps, Via: payment.CancelViaOpsTool})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,8 +215,8 @@ func TestCancelService_Outcomes(t *testing.T) {
 		t.Errorf("PROCESSING cancel should be CANCEL_REQUESTED, got %s", res.Outcome)
 	}
 
-	terminal := seedTransaction(t, pg, transaction.StatusSucceeded, 1000)
-	res, err = svc.Cancel(ctx, appcancel.CancelInput{TransactionID: terminal.ID, By: transaction.ActorOps, Via: transaction.CancelViaOpsTool})
+	terminal := seedTransaction(t, pg, payment.StatusSucceeded, 1000)
+	res, err = svc.Cancel(ctx, appcancel.CancelInput{TransactionID: terminal.ID, By: payment.ActorOps, Via: payment.CancelViaOpsTool})
 	if err != nil {
 		t.Fatal(err)
 	}

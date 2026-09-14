@@ -2,20 +2,18 @@ package payment
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/routing"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
-func processingExpiredTxn() *transaction.Transaction {
-	t, _ := transaction.New(uuid.New(), 150000, "INR", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@example.com", "order", nil, 30)
+func processingExpiredTxn() *transaction.Txn {
+	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@example.com", "order", nil, 30)
 	t.AttemptedGateway = "stripe"
 	t.ActualGateway = "stripe"
 	t.Status = transaction.StatusProcessing
@@ -27,30 +25,18 @@ func processingExpiredTxn() *transaction.Transaction {
 	return t
 }
 
-type multiRegistry struct {
-	adapters map[string]ports.GatewayAdapter
-}
-
-func (r *multiRegistry) Get(gatewayID string) (ports.GatewayAdapter, error) {
-	a, ok := r.adapters[gatewayID]
-	if !ok {
-		return nil, errors.New("no adapter for " + gatewayID)
-	}
-	return a, nil
-}
-
-func pendingTxn() *transaction.Transaction {
-	t, _ := transaction.New(uuid.New(), 150000, "INR", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@example.com", "order", nil, 30)
+func pendingTxn() *transaction.Txn {
+	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@example.com", "order", nil, 30)
 	t.AttemptedGateway = "stripe"
 	return t
 }
 
 func processService(repo *fakeRepo, lease *fakeLease, reg *fakeRegistry) *Service {
-	return NewService(repo, &fakeOutbox{}, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, lease, reg, noopLogger{}, noopMetrics{})
+	return NewService(repo, &fakeOutbox{}, &fakeConfig{}, &fakeTransactor{}, lease, reg, noopLogger{}, noopMetrics{})
 }
 
-func seedRepo(txn *transaction.Transaction) *fakeRepo {
-	return &fakeRepo{store: map[uuid.UUID]*transaction.Transaction{txn.ID: txn}}
+func seedRepo(txn *transaction.Txn) *fakeRepo {
+	return &fakeRepo{store: map[uuid.UUID]*transaction.Txn{txn.ID: txn}}
 }
 
 type fakeCancelResolver struct {
@@ -71,7 +57,7 @@ func TestProcessPayment_CancelResolutionHookFiresOnSucceededWithIntent(t *testin
 	txn.CancelIntent = true
 	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayPaymentResponse{Status: ports.GatewayPaymentStatusSucceeded}}}
 	resolver := &fakeCancelResolver{}
-	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
+	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 	svc.SetCancelResolver(resolver)
 
 	got, err := svc.ProcessPayment(context.Background(), txn.ID)
@@ -93,7 +79,7 @@ func TestProcessPayment_NoCancelResolutionWithoutIntent(t *testing.T) {
 	txn := pendingTxn() // CancelIntent false
 	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayPaymentResponse{Status: ports.GatewayPaymentStatusSucceeded}}}
 	resolver := &fakeCancelResolver{}
-	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
+	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 	svc.SetCancelResolver(resolver)
 
 	if _, err := svc.ProcessPayment(context.Background(), txn.ID); err != nil {
@@ -116,7 +102,7 @@ func TestProcessPayment_RecordsBreakerFailureOnNetworkError(t *testing.T) {
 	txn := pendingTxn()
 	reg := &fakeRegistry{adapter: &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategoryNetworkTimeout}}}
 	breaker := &fakeBreaker{}
-	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
+	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 	svc.SetCircuitBreaker(breaker)
 
 	if _, err := svc.ProcessPayment(context.Background(), txn.ID); err != nil {
@@ -131,14 +117,14 @@ func TestProcessPayment_RecordsBreakerSuccessOnDecline(t *testing.T) {
 	txn := pendingTxn()
 	reg := &fakeRegistry{adapter: &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategoryHardDecline}}}
 	breaker := &fakeBreaker{}
-	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
+	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 	svc.SetCircuitBreaker(breaker)
 
 	if _, err := svc.ProcessPayment(context.Background(), txn.ID); err != nil {
 		t.Fatal(err)
 	}
 	if breaker.successes != 1 || breaker.failures != 0 {
-		t.Errorf("a decline means the gateway is healthy; expected a success record, got failures=%d successes=%d", breaker.failures, breaker.successes)
+		t.Errorf("a decline means the gateway is healthy; expected breaker success, got failures=%d successes=%d", breaker.failures, breaker.successes)
 	}
 }
 
@@ -146,27 +132,23 @@ func TestProcessPayment_RecordsBreakerSuccessOnSuccess(t *testing.T) {
 	txn := pendingTxn()
 	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayPaymentResponse{Status: ports.GatewayPaymentStatusSucceeded}}}
 	breaker := &fakeBreaker{}
-	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
+	svc := NewService(seedRepo(txn), &fakeOutbox{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 	svc.SetCircuitBreaker(breaker)
 
 	if _, err := svc.ProcessPayment(context.Background(), txn.ID); err != nil {
 		t.Fatal(err)
 	}
-	if breaker.successes != 1 {
-		t.Errorf("expected a breaker success on a successful payment, got %d", breaker.successes)
+	if breaker.successes != 1 || breaker.failures != 0 {
+		t.Errorf("succeeded payment should record breaker success, got failures=%d successes=%d", breaker.failures, breaker.successes)
 	}
 }
 
 func TestProcessPayment_GatewaySucceeded(t *testing.T) {
 	txn := pendingTxn()
 	repo := seedRepo(txn)
-	lease := &fakeLease{acquired: true}
-	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayPaymentResponse{
-		GatewayReferenceID: "pi_1",
-		Status:             ports.GatewayPaymentStatusSucceeded,
-	}}}
 	outbox := &fakeOutbox{}
-	svc := NewService(repo, outbox, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, lease, reg, noopLogger{}, noopMetrics{})
+	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayPaymentResponse{GatewayReferenceID: "pi_1", Status: ports.GatewayPaymentStatusSucceeded}}}
+	svc := NewService(repo, outbox, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 
 	got, err := svc.ProcessPayment(context.Background(), txn.ID)
 	if err != nil {
@@ -176,246 +158,122 @@ func TestProcessPayment_GatewaySucceeded(t *testing.T) {
 		t.Errorf("expected SUCCEEDED, got %s", got.Status)
 	}
 	if got.GatewayReferenceID != "pi_1" {
-		t.Errorf("expected gateway reference recorded, got %q", got.GatewayReferenceID)
+		t.Errorf("expected ref pi_1, got %s", got.GatewayReferenceID)
 	}
-	if got.ActualGateway != "stripe" {
-		t.Errorf("expected actual gateway stripe, got %q", got.ActualGateway)
-	}
-	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypePaymentSucceeded {
-		t.Errorf("expected one PAYMENT_SUCCEEDED event, got %+v", outbox.events)
-	}
-	if lease.written == nil {
-		t.Error("expected cached response written to lease")
+	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeTransactionSucceeded {
+		t.Errorf("expected PAYMENT_SUCCEEDED outbox event, got %+v", outbox.events)
 	}
 }
 
 func TestProcessPayment_TerminalEventCarriesPostTransitionVersion(t *testing.T) {
-	txn := pendingTxn() // version 1
+	txn := pendingTxn()
 	repo := seedRepo(txn)
-	lease := &fakeLease{acquired: true}
-	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayPaymentResponse{
-		GatewayReferenceID: "pi_1",
-		Status:             ports.GatewayPaymentStatusSucceeded,
-	}}}
 	outbox := &fakeOutbox{}
-	svc := NewService(repo, outbox, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, lease, reg, noopLogger{}, noopMetrics{})
+	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayPaymentResponse{GatewayReferenceID: "pi_tv", Status: ports.GatewayPaymentStatusSucceeded}}}
+	svc := NewService(repo, outbox, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 
-	got, err := svc.ProcessPayment(context.Background(), txn.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if _, err := svc.ProcessPayment(context.Background(), txn.ID); err != nil {
+		t.Fatal(err)
 	}
 	if len(outbox.events) != 1 {
-		t.Fatalf("expected one terminal event, got %d", len(outbox.events))
+		t.Fatalf("expected 1 outbox event, got %d", len(outbox.events))
 	}
-
-	var p paymentTerminalPayload
-	if err := json.Unmarshal(outbox.events[0].Payload, &p); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
+	ev := outbox.events[0]
+	reloaded, err := repo.GetByID(context.Background(), txn.ID)
+	if err != nil {
+		t.Fatalf("reload txn: %v", err)
 	}
-	// The event must carry the version AFTER the terminal transition committed
-	// (PENDING->PROCESSING->SUCCEEDED bumps 1->2->3). Built before the bump it
-	// would read the stale PROCESSING version and consumers couldn't order it.
-	if p.AggregateVersion != got.Version {
-		t.Errorf("payload aggregate_version = %d, want post-transition version %d", p.AggregateVersion, got.Version)
-	}
-	if p.AggregateVersion <= 1 {
-		t.Errorf("aggregate_version %d should reflect the terminal transition, not creation", p.AggregateVersion)
-	}
-	// The envelope carries it too, so it lands in the outbox column and (opt-in)
-	// the SNS attribute — not just the JSON body.
-	if outbox.events[0].AggregateVersion != got.Version {
-		t.Errorf("envelope AggregateVersion = %d, want %d", outbox.events[0].AggregateVersion, got.Version)
+	if ev.AggregateVersion != reloaded.Version {
+		t.Errorf("event aggregate version %d should match post-transition txn version %d", ev.AggregateVersion, reloaded.Version)
 	}
 }
 
 func TestProcessPayment_GatewayHardDecline(t *testing.T) {
 	txn := pendingTxn()
-	reg := &fakeRegistry{adapter: &fakeAdapter{err: &ports.GatewayError{
-		Category:       ports.ErrorCategoryHardDecline,
-		Code:           "hard_decline",
-		GatewayMessage: "declined",
-	}}}
+	repo := seedRepo(txn)
 	outbox := &fakeOutbox{}
-	svc := NewService(seedRepo(txn), outbox, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
+	reg := &fakeRegistry{adapter: &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategoryHardDecline, Code: "do_not_honor", GatewayCode: "declined"}}}
+	svc := NewService(repo, outbox, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 
 	got, err := svc.ProcessPayment(context.Background(), txn.ID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Status != transaction.StatusFailed {
-		t.Errorf("expected FAILED, got %s", got.Status)
+		t.Errorf("expected FAILED on hard decline, got %s", got.Status)
 	}
-	if got.FailureReason == nil || got.FailureReason.Category != string(ports.ErrorCategoryHardDecline) {
-		t.Errorf("expected failure reason recorded, got %+v", got.FailureReason)
+	if got.FailureReason == nil || got.FailureReason.Code != "do_not_honor" {
+		t.Errorf("expected failure reason with code do_not_honor, got %+v", got.FailureReason)
 	}
-	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypePaymentFailed {
-		t.Errorf("expected one PAYMENT_FAILED event, got %+v", outbox.events)
+	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeTransactionFailed {
+		t.Errorf("expected PAYMENT_FAILED event, got %+v", outbox.events)
 	}
 }
 
 func TestProcessPayment_NetworkTimeoutStaysProcessing(t *testing.T) {
 	txn := pendingTxn()
-	reg := &fakeRegistry{adapter: &fakeAdapter{err: &ports.GatewayError{
-		Category:  ports.ErrorCategoryNetworkTimeout,
-		Code:      "network_error",
-		Retryable: true,
-	}}}
+	repo := seedRepo(txn)
 	outbox := &fakeOutbox{}
-	svc := NewService(seedRepo(txn), outbox, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
+	reg := &fakeRegistry{adapter: &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategoryNetworkTimeout}}}
+	svc := NewService(repo, outbox, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 
 	got, err := svc.ProcessPayment(context.Background(), txn.ID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Status != transaction.StatusProcessing {
-		t.Errorf("indeterminate outcome should remain PROCESSING, got %s", got.Status)
+		t.Errorf("expected PROCESSING on network timeout, got %s", got.Status)
 	}
 	if len(outbox.events) != 0 {
-		t.Errorf("no terminal event expected for indeterminate outcome, got %+v", outbox.events)
+		t.Errorf("no outbox event should be emitted for non-terminal outcome, got %d", len(outbox.events))
 	}
 }
 
 func TestProcessPayment_LeaseNotAcquired(t *testing.T) {
 	txn := pendingTxn()
 	repo := seedRepo(txn)
-	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayPaymentResponse{Status: ports.GatewayPaymentStatusSucceeded}}}
-	svc := processService(repo, &fakeLease{acquired: false}, reg)
+	svc := processService(repo, &fakeLease{acquired: false}, &fakeRegistry{adapter: &fakeAdapter{}})
 
 	got, err := svc.ProcessPayment(context.Background(), txn.ID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Status != transaction.StatusPending {
-		t.Errorf("without the lease the transaction should be returned untouched (PENDING), got %s", got.Status)
+		t.Errorf("a non-acquired lease should leave the txn PENDING, got %s", got.Status)
 	}
 	if repo.updates != 0 {
-		t.Errorf("expected no status updates when lease not acquired, got %d", repo.updates)
+		t.Errorf("no repo writes expected when lease not acquired, got %d updates", repo.updates)
 	}
 }
 
 func TestProcessPayment_NonPendingIsNoop(t *testing.T) {
 	txn := pendingTxn()
-	_ = transaction.TransitionState(txn, transaction.StatusProcessing, transaction.ActorSystem)
+	txn.Status = transaction.StatusProcessing
 	repo := seedRepo(txn)
-	svc := processService(repo, &fakeLease{acquired: true}, &fakeRegistry{adapter: &fakeAdapter{}})
+	svc := processService(repo, &fakeLease{}, &fakeRegistry{adapter: &fakeAdapter{}})
 
 	got, err := svc.ProcessPayment(context.Background(), txn.ID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Status != transaction.StatusProcessing {
-		t.Errorf("expected unchanged PROCESSING, got %s", got.Status)
-	}
-	if repo.updates != 0 {
-		t.Error("expected no work for a non-PENDING transaction")
+		t.Errorf("a non-PENDING txn should be returned as-is, got %s", got.Status)
 	}
 }
 
 func TestProcessPayment_UnknownGateway(t *testing.T) {
 	txn := pendingTxn()
-	svc := processService(seedRepo(txn), &fakeLease{acquired: true}, &fakeRegistry{err: errors.New("no adapter")})
-
-	if _, err := svc.ProcessPayment(context.Background(), txn.ID); err == nil {
-		t.Error("expected error when gateway adapter is not registered")
-	}
-}
-
-func TestProcessPayment_FallsBackToSecondGatewayOnSoftDecline(t *testing.T) {
-	txn := pendingTxn() // GatewayID "stripe"
 	repo := seedRepo(txn)
-	first := &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategorySoftDecline, Code: "soft_decline"}}
-	second := &fakeAdapter{resp: &ports.GatewayPaymentResponse{GatewayReferenceID: "pi_fb", Status: ports.GatewayPaymentStatusSucceeded}}
-	reg := &multiRegistry{adapters: map[string]ports.GatewayAdapter{"stripe": first, "razorpay": second}}
-	router := &fakeRouter{decision: &routing.Decision{SelectedGateway: "razorpay"}}
+	svc := processService(repo, &fakeLease{acquired: true}, &fakeRegistry{err: errors.New("unknown gateway")})
 
-	svc := NewService(repo, &fakeOutbox{}, router, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
-	svc.SetMaxGatewayAttempts(2)
-
-	got, err := svc.ProcessPayment(context.Background(), txn.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Status != transaction.StatusSucceeded {
-		t.Fatalf("expected fallback to succeed, got %s", got.Status)
-	}
-	if got.ActualGateway != "razorpay" || got.GatewayReferenceID != "pi_fb" {
-		t.Errorf("expected the second gateway to settle the payment, got gateway=%q ref=%q", got.ActualGateway, got.GatewayReferenceID)
-	}
-}
-
-func TestProcessPayment_NoFallbackWhenSingleAttempt(t *testing.T) {
-	txn := pendingTxn()
-	repo := seedRepo(txn)
-	first := &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategorySoftDecline, Code: "soft_decline"}}
-	second := &fakeAdapter{resp: &ports.GatewayPaymentResponse{GatewayReferenceID: "pi_fb", Status: ports.GatewayPaymentStatusSucceeded}}
-	reg := &multiRegistry{adapters: map[string]ports.GatewayAdapter{"stripe": first, "razorpay": second}}
-	router := &fakeRouter{decision: &routing.Decision{SelectedGateway: "razorpay"}}
-
-	// Default attempt budget is 1: a soft decline must finalize as FAILED, never re-route.
-	svc := NewService(repo, &fakeOutbox{}, router, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
-
-	got, err := svc.ProcessPayment(context.Background(), txn.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Status != transaction.StatusFailed {
-		t.Errorf("expected FAILED with no fallback budget, got %s", got.Status)
-	}
-	if got.ActualGateway != "stripe" {
-		t.Errorf("expected to stay on stripe, got %q", got.ActualGateway)
-	}
-}
-
-func TestProcessPayment_FallbackExhaustedStaysFailed(t *testing.T) {
-	txn := pendingTxn()
-	repo := seedRepo(txn)
-	first := &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategorySoftDecline, Code: "soft_decline"}}
-	second := &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategoryHardDecline, Code: "hard_decline"}}
-	reg := &multiRegistry{adapters: map[string]ports.GatewayAdapter{"stripe": first, "razorpay": second}}
-	router := &fakeRouter{decision: &routing.Decision{SelectedGateway: "razorpay"}}
-
-	svc := NewService(repo, &fakeOutbox{}, router, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
-	svc.SetMaxGatewayAttempts(2)
-
-	got, err := svc.ProcessPayment(context.Background(), txn.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Status != transaction.StatusFailed {
-		t.Errorf("expected FAILED after the fallback also declines, got %s", got.Status)
-	}
-	if got.ActualGateway != "razorpay" {
-		t.Errorf("expected the failure attributed to the last gateway tried, got %q", got.ActualGateway)
-	}
-}
-
-func TestProcessPayment_NoFallbackOnGatewayError(t *testing.T) {
-	txn := pendingTxn() // GatewayID "stripe"
-	repo := seedRepo(txn)
-	// A GatewayError is a "maybe charged" outcome (5xx / post-send failure), so
-	// re-attempting on another gateway risks a double charge.
-	first := &fakeAdapter{err: &ports.GatewayError{Category: ports.ErrorCategoryGatewayError, Code: "gateway_error"}}
-	second := &fakeAdapter{resp: &ports.GatewayPaymentResponse{GatewayReferenceID: "pi_fb", Status: ports.GatewayPaymentStatusSucceeded}}
-	reg := &multiRegistry{adapters: map[string]ports.GatewayAdapter{"stripe": first, "razorpay": second}}
-	router := &fakeRouter{decision: &routing.Decision{SelectedGateway: "razorpay"}}
-
-	svc := NewService(repo, &fakeOutbox{}, router, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
-	svc.SetMaxGatewayAttempts(2)
-
-	got, err := svc.ProcessPayment(context.Background(), txn.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.ActualGateway != "stripe" {
-		t.Errorf("a GatewayError must not re-attempt on another gateway, got %q", got.ActualGateway)
-	}
-	if got.GatewayReferenceID == "pi_fb" {
-		t.Error("the second gateway must not have been called after a GatewayError")
+	_, err := svc.ProcessPayment(context.Background(), txn.ID)
+	if err == nil {
+		t.Fatal("expected error for unknown gateway")
 	}
 }
 
 func recoverService(repo *fakeRepo, reg *fakeRegistry, outbox *fakeOutbox) *Service {
-	return NewService(repo, outbox, &fakeRouter{}, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
+	return NewService(repo, outbox, &fakeConfig{}, &fakeTransactor{}, &fakeLease{acquired: true}, reg, noopLogger{}, noopMetrics{})
 }
 
 func TestRecoverExpiredLease_FinalizesSucceeded(t *testing.T) {
@@ -434,7 +292,7 @@ func TestRecoverExpiredLease_FinalizesSucceeded(t *testing.T) {
 	if got.Status != transaction.StatusSucceeded {
 		t.Errorf("status check found the payment SUCCEEDED; expected the stuck txn finalized, got %s", got.Status)
 	}
-	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypePaymentSucceeded {
+	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeTransactionSucceeded {
 		t.Errorf("expected one PAYMENT_SUCCEEDED event on recovery, got %+v", outbox.events)
 	}
 }
@@ -454,7 +312,7 @@ func TestRecoverExpiredLease_FinalizesFailed(t *testing.T) {
 	if got.Status != transaction.StatusFailed {
 		t.Errorf("expected FAILED, got %s", got.Status)
 	}
-	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypePaymentFailed {
+	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeTransactionFailed {
 		t.Errorf("expected one PAYMENT_FAILED event, got %+v", outbox.events)
 	}
 }

@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	appcancel "samarth/payment-service/internal/app/cancel"
-	"samarth/payment-service/internal/domain/transaction"
+	appcancel "github.com/crownroutes/payment-service/internal/app/cancel"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
 )
 
 type fakeCancelService struct {
@@ -32,12 +32,12 @@ func postCancel(h *CancelHandler, id, body string) *httptest.ResponseRecorder {
 
 func TestCancel_Requested(t *testing.T) {
 	h := NewCancelHandler(&fakeCancelService{result: appcancel.Result{Outcome: appcancel.OutcomeRequested, Status: transaction.StatusProcessing}})
-	rec := postCancel(h, uuid.NewString(), `{"actor":"merchant","via":"api"}`)
+	rec := postCancel(h, uuid.NewString(), "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "CANCEL_REQUESTED") {
-		t.Errorf("expected CANCEL_REQUESTED in body, got %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "PROCESSING") {
+		t.Errorf("expected PROCESSING in body, got %s", rec.Body.String())
 	}
 }
 

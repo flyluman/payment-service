@@ -43,5 +43,5 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 		overall = "unhealthy"
 	}
 
-	writeJSON(w, status, healthResponse{Status: overall, Components: components})
+	writeJSON(w, r, status, healthResponse{Status: overall, Components: components})
 }

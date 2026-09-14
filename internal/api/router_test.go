@@ -10,23 +10,31 @@ import (
 
 	"io"
 	"log/slog"
-	"samarth/payment-service/internal/adapters/observability"
-	"samarth/payment-service/internal/api/handlers"
-	"samarth/payment-service/internal/app/idempotency"
-	"samarth/payment-service/internal/app/payment"
-	"samarth/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/api/middleware"
+	"github.com/crownroutes/payment-service/internal/adapters/observability"
+	"github.com/crownroutes/payment-service/internal/api/handlers"
+	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	"github.com/crownroutes/payment-service/internal/app/payment"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
-type stubService struct{ txn *transaction.Transaction }
+type stubService struct{ txn *transaction.Txn }
 
-func (s stubService) CreatePayment(ctx context.Context, in payment.CreatePaymentInput) (payment.CreateResult, error) {
-	return payment.CreateResult{Verdict: idempotency.Created, Transaction: s.txn}, nil
+func (s stubService) Create(ctx context.Context, in payment.CreateInput) (payment.CreateResult, error) {
+	return payment.CreateResult{Verdict: idempotency.Created, Transaction: s.txn, Token: "test-token"}, nil
 }
-func (s stubService) ProcessPayment(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error) {
+func (s stubService) ProcessPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	return s.txn, nil
 }
-func (s stubService) GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error) {
+func (s stubService) GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	return s.txn, nil
+}
+func (s stubService) GetGatewayMetadata(ctx context.Context, id uuid.UUID) (map[string]any, error) {
+	return nil, nil
+}
+func (s stubService) ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
+	return &ports.TransactionListResult{}, nil
 }
 
 type okPinger struct{}
@@ -34,7 +42,7 @@ type okPinger struct{}
 func (okPinger) Ping(ctx context.Context) error { return nil }
 
 func TestRouter_RoutesAndSetsRequestID(t *testing.T) {
-	txn, _ := transaction.New(uuid.New(), 1000, "INR", transaction.PaymentMethodCard, "stripe", uuid.New(), "", "", nil, 30)
+	txn, _ := transaction.New(uuid.New(), uuid.New(), 1000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "", "", nil, 30)
 	logger := observability.NewSlogLoggerFromHandler(slog.NewJSONHandler(io.Discard, nil))
 
 	router := NewRouter(Deps{
@@ -43,27 +51,21 @@ func TestRouter_RoutesAndSetsRequestID(t *testing.T) {
 		Logger:  logger,
 	})
 
-	srv := httptest.NewServer(router)
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/health")
-	if err != nil {
-		t.Fatal(err)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected /health 200, got %d", rec.Code)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected /health 200, got %d", resp.StatusCode)
-	}
-	if resp.Header.Get("X-Request-ID") == "" {
+	if rec.Header().Get("X-Request-ID") == "" {
 		t.Error("expected RequestID middleware to set X-Request-ID header")
 	}
 
-	resp2, err := http.Get(srv.URL + "/payments/" + txn.ID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Errorf("expected GET /payments/{id} 200, got %d", resp2.StatusCode)
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/payments/"+txn.ID.String(), nil)
+	req2 = req2.WithContext(middleware.ContextWithPrincipal(req2.Context(), middleware.Principal{TenantID: txn.TenantID.String()}))
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Errorf("expected GET /api/v1/payments/{id} 200, got %d", rec2.Code)
 	}
 }

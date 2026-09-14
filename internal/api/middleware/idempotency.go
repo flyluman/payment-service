@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type ResponseCacheStore interface {
@@ -50,8 +50,8 @@ func ResponseCache(cache ResponseCacheStore, log ports.Logger) func(http.Handler
 }
 
 func cacheKey(r *http.Request, key string) string {
-	merchant := MerchantIDFromContext(r.Context())
-	return hashString(merchant + ":" + r.Method + " " + r.URL.Path + ":" + key)
+	tenant := TenantIDFromContext(r.Context())
+	return hashString(tenant + ":" + r.Method + " " + r.URL.Path + ":" + key)
 }
 
 type responseRecorder struct {

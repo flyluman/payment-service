@@ -8,9 +8,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/refund"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/refund"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type refundTerminalPayload struct {
@@ -98,6 +98,17 @@ func (s *Service) ProcessRefund(ctx context.Context, refundID uuid.UUID) (*refun
 		s.log.Info(ports.LogEventRefundFailed, map[string]any{ports.FieldRefundID: rf.ID.String()})
 		s.metrics.Increment(ports.MetricRefundFailed, map[string]string{"gateway_id": rf.ActualGateway})
 	}
+
+	if s.audit != nil {
+		_ = s.audit.WriteEntry(ctx, &ports.AuditEntry{
+			TransactionID: &rf.TransactionID,
+			EventType:     ports.AuditEventTypeStateChange,
+			Actor:         string(transaction.ActorSystem),
+			PreviousState: string(refund.StatusProcessing),
+			NewState:      string(outcome.newStatus),
+			Reason:        "refund_processed",
+		})
+	}
 	return rf, nil
 }
 
@@ -134,7 +145,7 @@ func (s *Service) ResolveCancelRefund(ctx context.Context, transactionID uuid.UU
 	return nil
 }
 
-func (s *Service) callGateway(ctx context.Context, adapter ports.GatewayAdapter, rf *refund.Refund, parent *transaction.Transaction) (*ports.GatewayRefundResponse, *ports.GatewayError) {
+func (s *Service) callGateway(ctx context.Context, adapter ports.GatewayAdapter, rf *refund.Refund, parent *transaction.Txn) (*ports.GatewayRefundResponse, *ports.GatewayError) {
 	resp, err := adapter.Refund(ctx, ports.GatewayRefundRequest{
 		RefundID:           rf.ID,
 		TransactionID:      rf.TransactionID,

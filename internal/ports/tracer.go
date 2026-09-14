@@ -17,9 +17,9 @@ type Span interface {
 }
 
 const (
-	SpanCreatePayment    = "payment.create"
-	SpanGetPaymentStatus = "payment.get_status"
-	SpanCancelPayment    = "payment.cancel"
+	SpanCreateTransaction    = "transaction.create"
+	SpanGetTransactionStatus = "transaction.get_status"
+	SpanCancelTransaction    = "transaction.cancel"
 	SpanInitiateRefund   = "refund.initiate"
 	SpanGetRefundStatus  = "refund.get_status"
 

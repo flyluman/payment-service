@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type rzpWebhook struct {
@@ -17,6 +17,10 @@ type rzpWebhook struct {
 				ID      string `json:"id"`
 				OrderID string `json:"order_id"`
 				Status  string `json:"status"`
+				Method  string `json:"method"`
+				Card    *struct {
+					ThreeDSecure string `json:"three_d_secure"`
+				} `json:"card"`
 			} `json:"entity"`
 		} `json:"payment"`
 	} `json:"payload"`
@@ -44,10 +48,17 @@ func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret st
 		eventID = payment.ID
 	}
 
+	meta := map[string]any{}
+	if payment.Method == "card" && payment.Card != nil && payment.Card.ThreeDSecure == "required" {
+		meta["requires_3ds"] = true
+	}
+
 	return &ports.GatewayWebhookEvent{
 		EventID:            eventID,
 		GatewayReferenceID: payment.OrderID,
 		Status:             mapWebhookPaymentStatus(payment.Status),
+		EventType:          wh.Event,
+		GatewayMetadata: meta,
 	}, nil
 }
 

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Payment Failed</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#b71c1c,#c62828);min-height:100svh;display:grid;place-items:center;padding:clamp(12px,4vw,40px)}
+.card{background:#fff;width:100%;max-width:420px;border-radius:clamp(12px,2vw,18px);box-shadow:0 10px 30px rgba(0,0,0,.15);padding:clamp(20px,4vw,32px);text-align:center;animation:fadeIn .4s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.icon-wrap{font-size:64px;color:#c0392b;margin-bottom:10px}
+.title{font-size:clamp(22px,4vw,26px);font-weight:700;color:#b71c1c;margin-bottom:8px}
+.subtitle{font-size:clamp(14px,3vw,16px);color:#555;margin-bottom:clamp(20px,4vw,28px)}
+.detail{font-size:clamp(13px,3vw,14px);color:#444;margin-bottom:6px}
+.btn{display:block;width:100%;padding:clamp(12px,3vw,14px);border-radius:10px;text-decoration:none;font-size:clamp(14px,3vw,15px);font-weight:600;transition:background .2s ease;cursor:pointer;border:none}
+.btn-primary{background:#c0392b;color:#fff}
+.btn-primary:hover{background:#8e0000}
+.footer-note{font-size:clamp(11px,2.5vw,12px);color:#888;margin-top:clamp(12px,3vw,16px)}
+.redirect-note{font-size:clamp(12px,2.5vw,13px);color:#666;margin-top:14px}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="icon-wrap">&#x274C;</div>
+<div class="title">Payment Failed</div>
+<div class="subtitle">{{.Message}}</div>
+<div class="detail">Transaction ID: <strong>{{.TransactionID}}</strong></div>
+<div class="redirect-note">Redirecting in <span id="countdown">5</span> seconds...</div>
+<div class="footer-note">Secure payment</div>
+</div>
+<script>
+(function(){var u='{{.ReturnURL}}',c=document.getElementById('countdown'),i=setInterval(function(){var n=parseInt(c.textContent)-1;c.textContent=n;if(n<=0){clearInterval(i);if(u)window.location.href=u}},1000)})()
+</script>
+</body>
+</html>

@@ -9,25 +9,37 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
-func newTestAdapter(handler http.HandlerFunc) (*Adapter, *httptest.Server) {
-	srv := httptest.NewServer(handler)
-	return New(Config{KeyID: "rzp_test", KeySecret: "secret", BaseURL: srv.URL, HTTPClient: srv.Client()}), srv
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func newTestAdapter(handler http.HandlerFunc) *Adapter {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		return rec.Result(), nil
+	})}
+	return New(Config{
+		HTTPClient: client,
+		ResolveConfig: func(_ context.Context, _ uuid.UUID) (*TenantConfig, error) {
+			return &TenantConfig{KeyID: "rzp_test", KeySecret: "secret", BaseURL: "https://example.invalid"}, nil
+		},
+	})
 }
 
 func TestInitiatePayment_CreatesOrder(t *testing.T) {
 	var gotPath, gotAuth string
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"id":"order_1","status":"created","amount":150000,"currency":"INR"}`))
+		_, _ = w.Write([]byte(`{"id":"order_1","status":"created","amount":150000,"currency":"BDT"}`))
 	})
-	defer srv.Close()
 
 	resp, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{
-		TransactionID: uuid.New(), Amount: 150000, Currency: "INR", AttemptNumber: 1,
+		TransactionID: uuid.New(), TenantID: uuid.New(), Amount: 150000, Currency: "BDT", AttemptNumber: 1,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -44,12 +56,13 @@ func TestInitiatePayment_CreatesOrder(t *testing.T) {
 }
 
 func TestCheckStatus_PaidIsSucceeded(t *testing.T) {
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"order_2","status":"paid","amount":150000,"currency":"INR"}`))
+	txnID := uuid.New()
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"order_2","status":"paid","amount":150000,"currency":"BDT"}`))
 	})
-	defer srv.Close()
+	a.txnTenants.Store(txnID, uuid.New())
 
-	resp, err := a.CheckStatus(context.Background(), ports.GatewayStatusRequest{GatewayReferenceID: "order_2"})
+	resp, err := a.CheckStatus(context.Background(), ports.GatewayStatusRequest{TransactionID: txnID, GatewayReferenceID: "order_2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,12 +72,13 @@ func TestCheckStatus_PaidIsSucceeded(t *testing.T) {
 }
 
 func TestRefund_Processed(t *testing.T) {
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"rfnd_1","status":"processed","amount":150000,"currency":"INR"}`))
+	txnID := uuid.New()
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"rfnd_1","status":"processed","amount":150000,"currency":"BDT"}`))
 	})
-	defer srv.Close()
+	a.txnTenants.Store(txnID, uuid.New())
 
-	resp, err := a.Refund(context.Background(), ports.GatewayRefundRequest{GatewayReferenceID: "pay_1", Amount: 150000})
+	resp, err := a.Refund(context.Background(), ports.GatewayRefundRequest{TransactionID: txnID, GatewayReferenceID: "pay_1", Amount: 150000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +88,9 @@ func TestRefund_Processed(t *testing.T) {
 }
 
 func TestCancel_NotSupported(t *testing.T) {
-	a := New(Config{})
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("should not be called")
+	})
 	resp, _ := a.Cancel(context.Background(), ports.GatewayCancelRequest{})
 	if resp.Status != ports.GatewayCancelStatusNotSupported {
 		t.Errorf("razorpay should report cancel NOT_SUPPORTED, got %s", resp.Status)
@@ -82,13 +98,12 @@ func TestCancel_NotSupported(t *testing.T) {
 }
 
 func TestError_Classification(t *testing.T) {
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"code":"BAD_REQUEST_ERROR","reason":"payment_failed","description":"declined"}}`))
 	})
-	defer srv.Close()
 
-	_, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{TransactionID: uuid.New(), Amount: 1, Currency: "INR"})
+	_, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{TransactionID: uuid.New(), TenantID: uuid.New(), Amount: 1, Currency: "BDT"})
 	var gwErr *ports.GatewayError
 	if !errors.As(err, &gwErr) {
 		t.Fatalf("expected *ports.GatewayError, got %v", err)

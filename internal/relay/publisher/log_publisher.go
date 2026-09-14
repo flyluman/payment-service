@@ -3,7 +3,7 @@ package publisher
 import (
 	"context"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type LogPublisher struct {

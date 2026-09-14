@@ -1,0 +1,81 @@
+# Payment Service — local development configuration.
+# Non-secret defaults live here; secrets and deployment overrides come from
+# environment variables (which take precedence over every value below).
+
+app:
+  service_name: payment-service
+  version: 1.0.0
+  environment: dev
+  port: 8080
+  mtls_strict_mode: false
+
+startup:
+  connect_max_attempts: 10
+  connect_attempt_timeout_sec: 15
+  connect_backoff_sec: 2
+
+database:
+  primary_host: localhost
+  port: 5432
+  name: payment_dev
+  user: payment
+  password: payment
+  ssl_mode: disable
+  max_open_conns: 10
+  max_idle_conns: 2
+  conn_max_lifetime_sec: 1800
+  conn_max_idle_time_sec: 300
+  health_check_period_sec: 30
+
+valkey:
+  addrs:
+    - "localhost:6379"
+  rate_limit_db: 0
+  cache_db: 1
+  dial_timeout_sec: 5
+  read_timeout_sec: 3
+  write_timeout_sec: 3
+
+sns:
+  payment_events_topic: ""
+
+aws:
+  region: us-east-1
+
+outbox:
+  shard_count: 64
+  wal_lag_alert_threshold_mb: 2000
+  wal_lag_critical_threshold_mb: 5000
+  poll_interval_sec: 10
+  max_attempts: 5
+  batch_size: 50
+  claim_ttl_sec: 60
+  publisher: log
+  sns_aggregate_version_attr: false
+  worker_index: 0
+  worker_count: 1
+
+rate_limit:
+  fallback_multiplier: 0.5
+  local_max_buckets: 10000
+  health_check_interval_ms: 500
+  capacity: 100
+  refill_per_sec: 50
+
+gateway:
+  http_timeout_sec: 30
+  circuit_breaker_threshold: 5
+
+observability:
+  backend: stdout
+  log_level: debug
+
+security:
+  cert_refresh_interval_sec: 3600
+
+jobs:
+  lease_expiry_interval_sec: 60
+  idempotency_processing_timeout_sec: 300
+  partition_weeks_ahead: 2
+  partition_retention_weeks: 2
+  partition_drop_after_days: 14

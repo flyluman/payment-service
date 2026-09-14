@@ -1,6 +1,6 @@
 package observability
 
-import "samarth/payment-service/internal/ports"
+import "github.com/crownroutes/payment-service/internal/ports"
 
 type NoopMetrics struct{}
 

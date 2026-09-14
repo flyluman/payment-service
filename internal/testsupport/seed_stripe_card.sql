@@ -4,7 +4,7 @@ INSERT INTO gateway_config
      idempotency_capable, supports_cancel, supports_partial_refund, priority)
 VALUES
     ('stripe', 'Stripe', true, 0, 100000000,
-     ARRAY['INR'], ARRAY['card'],
+     ARRAY['BDT'], ARRAY['card'],
      true, true, true, 100)
 ON CONFLICT (gateway_id) DO NOTHING;
 

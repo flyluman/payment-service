@@ -12,27 +12,25 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/adapters/gateways"
-	"samarth/payment-service/internal/adapters/gateways/stripe"
-	"samarth/payment-service/internal/adapters/observability"
-	"samarth/payment-service/internal/adapters/postgres"
-	"samarth/payment-service/internal/app/payment"
-	approuting "samarth/payment-service/internal/app/routing"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
-	"samarth/payment-service/internal/testsupport"
+	"github.com/crownroutes/payment-service/internal/adapters/gateways"
+	"github.com/crownroutes/payment-service/internal/adapters/gateways/stripe"
+	"github.com/crownroutes/payment-service/internal/adapters/observability"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
+	apppayment "github.com/crownroutes/payment-service/internal/app/payment"
+	"github.com/crownroutes/payment-service/internal/domain/payment"
+	"github.com/crownroutes/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
-func buildService(pg *testsupport.PG, stripeURL string) *payment.Service {
+func buildService(pg *testsupport.PG, stripeURL string) *apppayment.Service {
 	cfg := postgres.NewConfigStore(pg.DB, pg.Q)
 	registry := gateways.NewRegistry()
 	registry.Register("stripe", stripe.New(stripe.Config{APIKey: "sk_test", BaseURL: stripeURL}))
 	logger := observability.NewSlogLoggerFromHandler(slog.NewJSONHandler(io.Discard, nil))
 
-	return payment.NewService(
-		postgres.NewTransactionRepository(pg.DB, pg.Q),
+	return apppayment.NewService(
+		postgres.NewPaymentRepository(pg.DB, pg.Q),
 		postgres.NewOutboxWriter(pg.DB, pg.Q),
-		approuting.NewRouter(cfg),
 		cfg,
 		postgres.NewTransactor(pg.DB),
 		postgres.NewLeaseRepository(pg.DB, pg.Q),
@@ -42,16 +40,18 @@ func buildService(pg *testsupport.PG, stripeURL string) *payment.Service {
 	)
 }
 
-func cardInput() payment.CreatePaymentInput {
-	return payment.CreatePaymentInput{
-		MerchantID:    uuid.New(),
+func cardInput() apppayment.CreateInput {
+	return apppayment.CreateInput{
+		TenantID:      uuid.New(),
+		UserID:        uuid.New(),
+		GatewayID:     "stripe",
 		Amount:        150000,
-		Currency:      "INR",
-		PaymentMethod: transaction.PaymentMethodCard,
+		Currency:      "BDT",
+		PaymentMethod: payment.PaymentMethodCard,
 		CustomerEmail: "buyer@example.com",
 		Description:   "integration order",
-		MerchantTier:  "standard",
-		IsDomestic:    true,
+		CallbackURL:   "https://example.com/callback",
+		RedirectURL:   "https://example.com/redirect",
 	}
 }
 
@@ -84,19 +84,19 @@ func TestPaymentFlow_SuccessEndToEnd(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"pi_flow_ok","status":"succeeded","amount":150000,"currency":"inr"}`))
+		_, _ = w.Write([]byte(`{"id":"pi_flow_ok","status":"succeeded","amount":150000,"currency":"bdt"}`))
 	}))
 	defer srv.Close()
 
 	svc := buildService(pg, srv.URL)
 	ctx := context.Background()
 
-	createdRes, err := svc.CreatePayment(ctx, cardInput())
+	createdRes, err := svc.Create(ctx, cardInput())
 	if err != nil {
-		t.Fatalf("CreatePayment: %v", err)
+		t.Fatalf("Create: %v", err)
 	}
 	created := createdRes.Transaction
-	if created.Status != transaction.StatusPending {
+	if created.Status != payment.StatusPending {
 		t.Errorf("expected PENDING after create, got %s", created.Status)
 	}
 	if created.GatewayID != "stripe" {
@@ -110,23 +110,22 @@ func TestPaymentFlow_SuccessEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProcessPayment: %v", err)
 	}
-	if processed.Status != transaction.StatusSucceeded {
+	if processed.Status != payment.StatusSucceeded {
 		t.Errorf("expected SUCCEEDED, got %s", processed.Status)
 	}
 	if processed.GatewayReferenceID != "pi_flow_ok" || processed.ActualGateway != "stripe" {
 		t.Errorf("expected gateway ref pi_flow_ok / actual stripe, got %q / %q", processed.GatewayReferenceID, processed.ActualGateway)
 	}
-
-	persisted, err := postgres.NewTransactionRepository(pg.DB, pg.Q).GetByID(ctx, created.ID)
+	persisted, err := postgres.NewPaymentRepository(pg.DB, pg.Q).GetByID(ctx, created.ID)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if persisted.Status != transaction.StatusSucceeded {
+	if persisted.Status != payment.StatusSucceeded {
 		t.Errorf("persisted status should be SUCCEEDED, got %s", persisted.Status)
 	}
 
 	types := outboxEventTypes(t, pg)
-	if len(types) != 2 || !contains(types, ports.EventTypePaymentCreated) || !contains(types, ports.EventTypePaymentSucceeded) {
+	if len(types) != 2 || !contains(types, ports.EventTypeTransactionCreated) || !contains(types, ports.EventTypeTransactionSucceeded) {
 		t.Errorf("expected PAYMENT_CREATED + PAYMENT_SUCCEEDED in outbox, got %v", types)
 	}
 }
@@ -145,9 +144,9 @@ func TestPaymentFlow_GatewayDecline(t *testing.T) {
 	svc := buildService(pg, srv.URL)
 	ctx := context.Background()
 
-	createdRes, err := svc.CreatePayment(ctx, cardInput())
+	createdRes, err := svc.Create(ctx, cardInput())
 	if err != nil {
-		t.Fatalf("CreatePayment: %v", err)
+		t.Fatalf("Create: %v", err)
 	}
 	created := createdRes.Transaction
 
@@ -155,7 +154,7 @@ func TestPaymentFlow_GatewayDecline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProcessPayment: %v", err)
 	}
-	if processed.Status != transaction.StatusFailed {
+	if processed.Status != payment.StatusFailed {
 		t.Errorf("expected FAILED on decline, got %s", processed.Status)
 	}
 	if processed.FailureReason == nil {
@@ -163,7 +162,7 @@ func TestPaymentFlow_GatewayDecline(t *testing.T) {
 	}
 
 	types := outboxEventTypes(t, pg)
-	if !contains(types, ports.EventTypePaymentFailed) {
+	if !contains(types, ports.EventTypeTransactionFailed) {
 		t.Errorf("expected PAYMENT_FAILED in outbox, got %v", types)
 	}
 }
@@ -175,10 +174,10 @@ func TestPaymentFlow_NoEligibleGateway(t *testing.T) {
 
 	svc := buildService(pg, "http://unused")
 	in := cardInput()
-	in.PaymentMethod = transaction.PaymentMethodUPI // no gateway supports UPI
+	in.PaymentMethod = payment.PaymentMethodUPI // no gateway supports UPI
 
-	_, err := svc.CreatePayment(context.Background(), in)
-	if err != payment.ErrNoGateway {
+	_, err := svc.Create(context.Background(), in)
+	if err != apppayment.ErrNoGateway {
 		t.Fatalf("expected ErrNoGateway for unsupported method, got %v", err)
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"time"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type Partition struct {

@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"samarth/payment-service/internal/adapters/postgres"
-	"samarth/payment-service/internal/app/idempotency"
-	"samarth/payment-service/internal/app/payment"
-	"samarth/payment-service/internal/testsupport"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
+	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	"github.com/crownroutes/payment-service/internal/app/payment"
+	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
 // idempotentService wires the service-owned idempotency guard and NO HTTP cache
@@ -43,9 +43,9 @@ func TestServiceIdempotency_ConcurrentSingleExecution(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := svc.CreatePayment(ctx, in)
+			res, err := svc.Checkout(ctx, in)
 			if err != nil {
-				t.Errorf("CreatePayment: %v", err)
+				t.Errorf("Checkout: %v", err)
 				return
 			}
 			switch res.Verdict {
@@ -88,7 +88,7 @@ func TestServiceIdempotency_SequentialReplayReturnsSameTransaction(t *testing.T)
 	in := cardInput()
 	in.IdempotencyKey = "seq-key"
 
-	first, err := svc.CreatePayment(ctx, in)
+	first, err := svc.Checkout(ctx, in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestServiceIdempotency_SequentialReplayReturnsSameTransaction(t *testing.T)
 		t.Fatalf("first call should be Created, got %v", first.Verdict)
 	}
 
-	second, err := svc.CreatePayment(ctx, in)
+	second, err := svc.Checkout(ctx, in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,13 +126,13 @@ func TestServiceIdempotency_KeyReusedWithDifferentBody(t *testing.T) {
 	in := cardInput()
 	in.IdempotencyKey = "reuse-key"
 
-	if _, err := svc.CreatePayment(ctx, in); err != nil {
+	if _, err := svc.Checkout(ctx, in); err != nil {
 		t.Fatal(err)
 	}
 
 	reused := in
 	reused.Amount = in.Amount + 1 // same key, different canonical body
-	res, err := svc.CreatePayment(ctx, reused)
+	res, err := svc.Checkout(ctx, reused)
 	if err != nil {
 		t.Fatal(err)
 	}

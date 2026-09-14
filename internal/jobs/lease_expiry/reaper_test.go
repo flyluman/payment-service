@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type fakeLister struct {
@@ -26,12 +26,12 @@ type fakeRecoverer struct {
 	failFor map[uuid.UUID]bool
 }
 
-func (f *fakeRecoverer) RecoverExpiredLease(_ context.Context, id uuid.UUID) (*transaction.Transaction, error) {
+func (f *fakeRecoverer) RecoverExpiredLease(_ context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	f.called = append(f.called, id)
 	if f.failFor[id] {
 		return nil, errors.New("recover failed")
 	}
-	return &transaction.Transaction{ID: id, Status: transaction.StatusSucceeded}, nil
+	return &transaction.Txn{ID: id, Status: transaction.StatusSucceeded}, nil
 }
 
 type fakeSweeper struct {

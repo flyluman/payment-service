@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type OutboxReader interface {
@@ -28,6 +28,7 @@ type Config struct {
 	PollInterval time.Duration
 	BaseBackoff  time.Duration
 	MaxBackoff   time.Duration
+	Wakeup       <-chan struct{} // optional; signals immediate poll on next_attempt_at
 }
 
 type Worker struct {
@@ -58,8 +59,12 @@ func NewWorker(outbox OutboxReader, publisher Publisher, log ports.Logger, metri
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	mode := "polling"
+	if w.cfg.Wakeup != nil {
+		mode = "hybrid (poll + notify)"
+	}
 	w.log.Info(ports.LogEventRelayModeSwitch, map[string]any{
-		ports.FieldRelayMode: "polling",
+		ports.FieldRelayMode: mode,
 		"shard_count":        len(w.cfg.Shards),
 	})
 
@@ -89,8 +94,16 @@ func (w *Worker) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(w.cfg.PollInterval):
+		case <-w.notifyOrNil():
 		}
 	}
+}
+
+func (w *Worker) notifyOrNil() <-chan struct{} {
+	if w.cfg.Wakeup != nil {
+		return w.cfg.Wakeup
+	}
+	return nil
 }
 
 func (w *Worker) RunOnce(ctx context.Context) (count, published int, err error) {

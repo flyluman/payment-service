@@ -4,43 +4,46 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
+type TenantConfig struct {
+	KeyID          string
+	KeySecret      string
+	BaseURL        string
+	PublishableKey string
+}
+
 type Config struct {
-	KeyID      string
-	KeySecret  string
-	BaseURL    string
-	Timeout    time.Duration
-	HTTPClient *http.Client
+	Timeout       time.Duration
+	HTTPClient    *http.Client
+	ResolveConfig func(ctx context.Context, tenantID uuid.UUID) (*TenantConfig, error)
 }
 
 const maxResponseBytes = 2 << 20
 const defaultHTTPTimeout = 30 * time.Second
 
 type Adapter struct {
-	keyID     string
-	keySecret string
-	baseURL   string
-	client    *http.Client
+	resolve func(ctx context.Context, tenantID uuid.UUID) (*TenantConfig, error)
+	client  *http.Client
+
+	txnTenants sync.Map
 }
 
 func New(cfg Config) *Adapter {
-	base := cfg.BaseURL
-	if base == "" {
-		base = "https://api.razorpay.com"
-	}
 	client := cfg.HTTPClient
 	if client == nil {
 		timeout := cfg.Timeout
@@ -50,10 +53,8 @@ func New(cfg Config) *Adapter {
 		client = &http.Client{Timeout: timeout}
 	}
 	return &Adapter{
-		keyID:     cfg.KeyID,
-		keySecret: cfg.KeySecret,
-		baseURL:   strings.TrimRight(base, "/"),
-		client:    client,
+		resolve: cfg.ResolveConfig,
+		client:  client,
 	}
 }
 
@@ -66,11 +67,21 @@ func (a *Adapter) Capabilities() ports.GatewayCapabilities {
 			transaction.PaymentMethodCard, transaction.PaymentMethodUPI,
 			transaction.PaymentMethodNetbanking, transaction.PaymentMethodWallet,
 		},
-		SupportedCurrencies: []string{"INR"},
+		SupportedCurrencies: []string{"BDT"},
 	}
 }
 
 func (a *Adapter) InitiatePayment(ctx context.Context, req ports.GatewayPaymentRequest) (*ports.GatewayPaymentResponse, error) {
+	tc, err := a.resolve(ctx, req.TenantID)
+	if err != nil {
+		return nil, &ports.GatewayError{
+			Category: ports.ErrorCategoryGatewayError, Code: "config_resolve_error",
+			GatewayMessage: err.Error(),
+		}
+	}
+
+	a.txnTenants.Store(req.TransactionID, req.TenantID)
+
 	receipt := req.IdempotencyKey
 	if receipt == "" {
 		receipt = deriveReceipt(req.TransactionID, req.AttemptNumber)
@@ -84,21 +95,31 @@ func (a *Adapter) InitiatePayment(ctx context.Context, req ports.GatewayPaymentR
 	}
 
 	var order rzpOrder
-	if err := a.do(ctx, http.MethodPost, "/v1/orders", body, &order); err != nil {
+	if err := a.do(ctx, tc, http.MethodPost, "/v1/orders", body, &order); err != nil {
 		return nil, err
 	}
-	return toPaymentResponse(&order), nil
+	return toPaymentResponse(&order, tc), nil
 }
 
 func (a *Adapter) CheckStatus(ctx context.Context, req ports.GatewayStatusRequest) (*ports.GatewayPaymentResponse, error) {
-	var order rzpOrder
-	if err := a.do(ctx, http.MethodGet, "/v1/orders/"+url.PathEscape(req.GatewayReferenceID), nil, &order); err != nil {
+	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	if err != nil {
 		return nil, err
 	}
-	return toPaymentResponse(&order), nil
+
+	var order rzpOrder
+	if err := a.do(ctx, tc, http.MethodGet, "/v1/orders/"+url.PathEscape(req.GatewayReferenceID), nil, &order); err != nil {
+		return nil, err
+	}
+	return toPaymentResponse(&order, tc), nil
 }
 
 func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*ports.GatewayRefundResponse, error) {
+	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	if err != nil {
+		return nil, err
+	}
+
 	body := map[string]any{}
 	if req.Amount > 0 {
 		body["amount"] = req.Amount
@@ -108,7 +129,7 @@ func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*
 	}
 
 	var refund rzpRefund
-	if err := a.do(ctx, http.MethodPost, "/v1/payments/"+url.PathEscape(req.GatewayReferenceID)+"/refund", body, &refund); err != nil {
+	if err := a.do(ctx, tc, http.MethodPost, "/v1/payments/"+url.PathEscape(req.GatewayReferenceID)+"/refund", body, &refund); err != nil {
 		return nil, err
 	}
 	return &ports.GatewayRefundResponse{
@@ -123,7 +144,23 @@ func (a *Adapter) Cancel(ctx context.Context, req ports.GatewayCancelRequest) (*
 	return &ports.GatewayCancelResponse{Status: ports.GatewayCancelStatusNotSupported}, nil
 }
 
-func (a *Adapter) do(ctx context.Context, method, path string, body any, out any) error {
+func (a *Adapter) resolveForTxn(ctx context.Context, txnID uuid.UUID) (*TenantConfig, error) {
+	v, ok := a.txnTenants.Load(txnID)
+	if !ok {
+		return nil, &ports.GatewayError{
+			Category: ports.ErrorCategoryGatewayError, Code: "tenant_not_cached",
+			GatewayMessage: fmt.Sprintf("tenant for transaction %s not found", txnID),
+		}
+	}
+	return a.resolve(ctx, v.(uuid.UUID))
+}
+
+func (a *Adapter) do(ctx context.Context, tc *TenantConfig, method, path string, body any, out any) error {
+	baseURL := tc.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.razorpay.com"
+	}
+
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -133,11 +170,11 @@ func (a *Adapter) do(ctx context.Context, method, path string, body any, out any
 		reader = bytes.NewReader(b)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, method, a.baseURL+path, reader)
+	httpReq, err := http.NewRequestWithContext(ctx, method, baseURL+path, reader)
 	if err != nil {
 		return &ports.GatewayError{Category: ports.ErrorCategoryGatewayError, Code: "request_build_error", GatewayMessage: err.Error()}
 	}
-	httpReq.SetBasicAuth(a.keyID, a.keySecret)
+	httpReq.SetBasicAuth(tc.KeyID, tc.KeySecret)
 	if body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
@@ -200,16 +237,21 @@ func base62(n uint32) string {
 	return string(buf)
 }
 
-func toPaymentResponse(o *rzpOrder) *ports.GatewayPaymentResponse {
+func toPaymentResponse(o *rzpOrder, tc *TenantConfig) *ports.GatewayPaymentResponse {
 	resp := &ports.GatewayPaymentResponse{
 		GatewayReferenceID: o.ID,
 		Status:             mapOrderStatus(o.Status),
 		Amount:             o.Amount,
 		Currency:           strings.ToUpper(o.Currency),
-		RawMetadata:        map[string]any{},
+		GatewayMetadata:    map[string]any{},
 	}
 	for k, v := range o.Notes {
-		resp.RawMetadata[k] = v
+		resp.GatewayMetadata[k] = v
+	}
+	resp.GatewayMetadata["order_id"] = o.ID
+	resp.GatewayMetadata["key_id"] = tc.KeyID
+	if tc.PublishableKey != "" {
+		resp.GatewayMetadata["publishable_key"] = tc.PublishableKey
 	}
 	return resp
 }

@@ -10,18 +10,19 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/app/idempotency"
-	"samarth/payment-service/internal/domain/routing"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 var ErrNoGateway = errors.New("payment: no eligible gateway for transaction")
 
-type TransactionRepo interface {
-	Insert(ctx context.Context, t *transaction.Transaction) error
-	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error)
-	UpdateStatus(ctx context.Context, t *transaction.Transaction) error
+type TransactionRepository interface {
+	Insert(ctx context.Context, t *transaction.Txn) error
+	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
+	UpdateStatus(ctx context.Context, t *transaction.Txn) error
+	UpdateGatewayReference(ctx context.Context, id uuid.UUID, gatewayRefID string, expectedVersion int) error
+	List(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error)
 }
 type EventWriter interface {
 	Write(ctx context.Context, event ports.OutboxEvent) error
@@ -30,14 +31,14 @@ type Transactor interface {
 	WithinTx(ctx context.Context, fn func(ctx context.Context) error) error
 }
 type ConfigReader interface {
+	GetGatewayConfig(ctx context.Context, gatewayID string) (*ports.GatewayConfig, error)
 	GetProcessingTimeout(ctx context.Context, gatewayID, paymentMethod string) (time.Duration, error)
-}
-type Router interface {
-	Route(ctx context.Context, in RouteInput) (*routing.Decision, error)
+	GetFeeModel(ctx context.Context, gatewayID, paymentMethod string) (*ports.GatewayFeeModel, error)
 }
 type LeaseStore interface {
-	Acquire(ctx context.Context, leaseKey, paymentIntentID uuid.UUID, ttlSec int) (bool, []byte, error)
+	Acquire(ctx context.Context, leaseKey, transactionID uuid.UUID, ttlSec int) (bool, []byte, error)
 	WriteCachedResponse(ctx context.Context, leaseKey uuid.UUID, response []byte) error
+	TryAcquireDirect(ctx context.Context, leaseKey, transactionID uuid.UUID, ttlSec int) (bool, error)
 }
 type GatewayRegistry interface {
 	Get(gatewayID string) (ports.GatewayAdapter, error)
@@ -53,33 +54,9 @@ type IntentTracker interface {
 	EnterProcessing(ctx context.Context, gatewayID string, txnID uuid.UUID, ttl time.Duration) error
 	ExitProcessing(ctx context.Context, gatewayID string, txnID uuid.UUID) error
 }
-
-type RouteInput struct {
-	Amount          int64
-	Currency        string
-	PaymentMethod   transaction.PaymentMethod
-	MerchantTier    string
-	IsDomestic      bool
-	ExcludeGateways []string
-}
-type CreatePaymentInput struct {
-	MerchantID     uuid.UUID
-	Amount         int64
-	Currency       string
-	PaymentMethod  transaction.PaymentMethod
-	CustomerID     uuid.UUID
-	CustomerEmail  string
-	Description    string
-	Metadata       map[string]any
-	MerchantTier   string
-	IsDomestic     bool
-	IdempotencyKey string
-}
-
 type Service struct {
-	repo           TransactionRepo
+	repo           TransactionRepository
 	outbox         EventWriter
-	router         Router
 	config         ConfigReader
 	tx             Transactor
 	lease          LeaseStore
@@ -88,21 +65,24 @@ type Service struct {
 	breaker        CircuitBreaker
 	intents        IntentTracker
 	idem           *idempotency.Guard
-	maxAttempts    int
+	gatewayMetaStore  GatewayMetadataStore
+	audit          ports.AuditLogStore
 	log            ports.Logger
 	metrics        ports.MetricRecorder
+	bus            ports.EventBus
 }
 
-func (s *Service) SetCancelResolver(r CancelResolver)  { s.cancelResolver = r }
-func (s *Service) SetCircuitBreaker(b CircuitBreaker)  { s.breaker = b }
-func (s *Service) SetIntentTracker(t IntentTracker)    { s.intents = t }
-func (s *Service) SetMaxGatewayAttempts(n int)         { s.maxAttempts = n }
-func (s *Service) SetIdempotency(g *idempotency.Guard) { s.idem = g }
+func (s *Service) SetCancelResolver(r CancelResolver)   { s.cancelResolver = r }
+func (s *Service) SetCircuitBreaker(b CircuitBreaker)   { s.breaker = b }
+func (s *Service) SetIntentTracker(t IntentTracker)     { s.intents = t }
+func (s *Service) SetIdempotency(g *idempotency.Guard)  { s.idem = g }
+func (s *Service) SetGatewayMetadataStore(w GatewayMetadataStore) { s.gatewayMetaStore = w }
+func (s *Service) SetEventBus(bus ports.EventBus)          { s.bus = bus }
+func (s *Service) SetAuditLogStore(a ports.AuditLogStore)  { s.audit = a }
 
 func NewService(
-	repo TransactionRepo,
+	repo TransactionRepository,
 	outbox EventWriter,
-	router Router,
 	config ConfigReader,
 	tx Transactor,
 	lease LeaseStore,
@@ -111,21 +91,22 @@ func NewService(
 	metrics ports.MetricRecorder,
 ) *Service {
 	return &Service{
-		repo:     repo,
-		outbox:   outbox,
-		router:   router,
-		config:   config,
-		tx:       tx,
-		lease:    lease,
+		repo:    repo,
+		outbox:  outbox,
+		config:  config,
+		tx:      tx,
+		lease:   lease,
 		gateways: gateways,
-		log:      log,
-		metrics:  metrics,
+		log:     log,
+		metrics: metrics,
 	}
 }
 
-type paymentCreatedPayload struct {
+type transactionCreatedPayload struct {
 	TransactionID    string `json:"transaction_id"`
-	MerchantID       string `json:"merchant_id"`
+	TenantID         string `json:"tenant_id"`
+	UserID           string `json:"user_id"`
+
 	Amount           int64  `json:"amount"`
 	Currency         string `json:"currency"`
 	PaymentMethod    string `json:"payment_method"`
@@ -135,112 +116,191 @@ type paymentCreatedPayload struct {
 	AggregateVersion int    `json:"aggregate_version"`
 }
 
-func (s *Service) GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error) {
+
+type GatewayMetadataStore interface {
+	InsertGatewayMetadata(ctx context.Context, transactionID uuid.UUID, gatewayID string, payload []byte) error
+	GetGatewayMetadata(ctx context.Context, transactionID uuid.UUID) ([]byte, error)
+}
+
+func (s *Service) GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	return s.repo.GetByID(ctx, id)
+}
+
+type gatewayInitiatePayload struct {
+	TransactionID string `json:"transaction_id"`
+	TenantID      string `json:"tenant_id"`
+	GatewayID     string `json:"gateway_id"`
+}
+
+func (s *Service) ProcessGatewayInitiate(ctx context.Context, transactionID uuid.UUID) error {
+	txn, err := s.repo.GetByID(ctx, transactionID)
+	if err != nil {
+		return fmt.Errorf("gateway-initiate: load transaction %s: %w", transactionID, err)
+	}
+	if txn.GatewayReferenceID != "" {
+		return nil
+	}
+	if txn.Status != transaction.StatusPending {
+		return nil
+	}
+
+	ttlSec := txn.EstimatedTimeoutSeconds
+	if ttlSec <= 0 {
+		ttlSec = 30
+	}
+	acquired, err := s.lease.TryAcquireDirect(ctx, txn.ID, txn.ID, ttlSec)
+	if err != nil {
+		return fmt.Errorf("gateway-initiate: acquire lease: %w", err)
+	}
+	if !acquired {
+		return nil
+	}
+
+	adapter, err := s.gateways.Get(txn.GatewayID)
+	if err != nil {
+		return fmt.Errorf("gateway-initiate: resolve adapter for %s: %w", txn.GatewayID, err)
+	}
+
+	resp, err := adapter.InitiatePayment(ctx, ports.GatewayPaymentRequest{
+		TransactionID: txn.ID,
+		TenantID:      txn.TenantID,
+		Amount:        txn.Amount,
+		Currency:      txn.Currency,
+		PaymentMethod: txn.PaymentMethod,
+		Metadata:      txn.Metadata,
+		CustomerEmail: txn.CustomerEmail,
+		Description:   txn.Description,
+		AttemptNumber: 1,
+	})
+	if err != nil {
+		s.recordGatewayError(ctx, txn, err)
+		return fmt.Errorf("gateway-initiate: gateway call failed: %w", err)
+	}
+
+	return s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		if err := s.repo.UpdateGatewayReference(ctx, txn.ID, resp.GatewayReferenceID, txn.Version); err != nil {
+			return fmt.Errorf("update gateway reference: %w", err)
+		}
+		if s.gatewayMetaStore != nil && len(resp.GatewayMetadata) > 0 {
+			metaPayload, err := json.Marshal(resp.GatewayMetadata)
+			if err != nil {
+				return fmt.Errorf("marshal raw metadata: %w", err)
+			}
+			if err := s.gatewayMetaStore.InsertGatewayMetadata(ctx, txn.ID, txn.GatewayID, metaPayload); err != nil {
+				return fmt.Errorf("insert raw metadata: %w", err)
+			}
+		}
+
+		if err := transaction.TransitionState(txn, transaction.StatusProcessing, transaction.ActorSystem); err != nil {
+			return fmt.Errorf("transition to processing: %w", err)
+		}
+		if s.audit != nil {
+			_ = s.audit.WriteEntry(ctx, &ports.AuditEntry{
+				TransactionID: &txn.ID,
+				EventType:     ports.AuditEventTypeStateChange,
+				Actor:         string(transaction.ActorSystem),
+				PreviousState: string(transaction.StatusPending),
+				NewState:      string(txn.Status),
+				Reason:        "gateway_initiate",
+			})
+		}
+		if err := s.repo.UpdateStatus(ctx, txn); err != nil {
+			return fmt.Errorf("update status: %w", err)
+		}
+
+		if s.bus != nil {
+			s.bus.Publish(ctx, ports.StatusEvent{
+				TransactionID: txn.ID,
+				Status:        transaction.StatusProcessing,
+			})
+		}
+		return nil
+	})
+}
+
+func (s *Service) recordGatewayError(ctx context.Context, txn *transaction.Txn, gatewayErr error) {
+	if s.breaker != nil {
+		_ = s.breaker.RecordFailure(ctx, txn.GatewayID)
+	}
+}
+
+func (s *Service) GetGatewayMetadata(ctx context.Context, transactionID uuid.UUID) (map[string]any, error) {
+	if s.gatewayMetaStore == nil {
+		return nil, nil
+	}
+	raw, err := s.gatewayMetaStore.GetGatewayMetadata(ctx, transactionID)
+	if err != nil {
+		return nil, nil
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil, nil
+	}
+	return meta, nil
+}
+
+type CreateInput struct {
+	TenantID       uuid.UUID
+	UserID         uuid.UUID
+	GatewayID      string
+
+	Amount         int64
+	Currency       string
+	PaymentMethod  transaction.PaymentMethod
+	CustomerID     uuid.UUID
+	CustomerEmail  string
+	Description    string
+	Metadata       map[string]any
+
+	CallbackURL    string
+	RedirectURL    string
+	IdempotencyKey string
 }
 
 type CreateResult struct {
 	Verdict     idempotency.Verdict
-	Transaction *transaction.Transaction
+	Transaction *transaction.Txn
+	Token       string
 }
 
-type idempotencyPaymentResponse struct {
+type idempotencyTransactionResponse struct {
 	TransactionID string `json:"transaction_id"`
+	Token         string `json:"token,omitempty"`
 }
 
-func (s *Service) CreatePayment(ctx context.Context, in CreatePaymentInput) (CreateResult, error) {
-	// Routing and config reads acquire their own pool connections, so they must
-	// run BEFORE (never nested inside) the reservation transaction — otherwise a
-	// burst of concurrent creates each hold a tx connection while waiting for a
-	// second one to route, and the pool deadlocks.
-	txn, event, err := s.buildTransaction(ctx, in)
+func (s *Service) Create(ctx context.Context, in CreateInput) (CreateResult, error) {
+	gateway := in.GatewayID
+	if gateway == "" {
+		return CreateResult{}, ErrNoGateway
+	}
+	cfg, err := s.config.GetGatewayConfig(ctx, gateway)
 	if err != nil {
-		return CreateResult{}, err
+		return CreateResult{}, fmt.Errorf("payment: gateway config for %s: %w", gateway, err)
 	}
-
-	if s.idem == nil {
-		if err := s.tx.WithinTx(ctx, func(ctx context.Context) error {
-			return s.insertTransaction(ctx, txn, event)
-		}); err != nil {
-			return CreateResult{}, err
-		}
-		s.logCreated(txn)
-		return CreateResult{Verdict: idempotency.Created, Transaction: txn}, nil
+	if !cfg.IsActive {
+		return CreateResult{}, ErrNoGateway
 	}
-
-	if in.IdempotencyKey == "" {
-		return CreateResult{}, idempotency.ErrKeyRequired
-	}
-	composite := idempotency.Composite(in.MerchantID.String(), "create_payment", in.IdempotencyKey)
-	requestHash := createRequestHash(in)
-
-	res, err := s.idem.Execute(ctx, composite, requestHash, func(ctx context.Context) ([]byte, error) {
-		if err := s.insertTransaction(ctx, txn, event); err != nil {
-			return nil, err
-		}
-		return json.Marshal(idempotencyPaymentResponse{TransactionID: txn.ID.String()})
-	})
-	if err != nil {
-		return CreateResult{}, err
-	}
-
-	switch res.Verdict {
-	case idempotency.Created:
-		s.logCreated(txn)
-		return CreateResult{Verdict: res.Verdict, Transaction: txn}, nil
-	case idempotency.Replayed:
-		var stored idempotencyPaymentResponse
-		if err := json.Unmarshal(res.Response, &stored); err != nil {
-			return CreateResult{}, fmt.Errorf("payment: decode idempotent response: %w", err)
-		}
-		id, err := uuid.Parse(stored.TransactionID)
-		if err != nil {
-			return CreateResult{}, fmt.Errorf("payment: bad stored transaction id: %w", err)
-		}
-		existing, err := s.repo.GetByID(ctx, id)
-		if err != nil {
-			return CreateResult{}, fmt.Errorf("payment: reload idempotent transaction %s: %w", id, err)
-		}
-		return CreateResult{Verdict: res.Verdict, Transaction: existing}, nil
-	default:
-		return CreateResult{Verdict: res.Verdict}, nil
-	}
-}
-
-func (s *Service) buildTransaction(ctx context.Context, in CreatePaymentInput) (*transaction.Transaction, *ports.OutboxEvent, error) {
-	decision, err := s.router.Route(ctx, RouteInput{
-		Amount:        in.Amount,
-		Currency:      in.Currency,
-		PaymentMethod: in.PaymentMethod,
-		MerchantTier:  in.MerchantTier,
-		IsDomestic:    in.IsDomestic,
-	})
-	if err != nil {
-		var noCandidate routing.ErrNoCandidate
-		if errors.As(err, &noCandidate) {
-			s.log.Warn(ports.LogEventRoutingNoCandidate, map[string]any{
-				ports.FieldMerchantID:    in.MerchantID.String(),
-				ports.FieldPaymentMethod: string(in.PaymentMethod),
-			})
-			return nil, nil, ErrNoGateway
-		}
-		return nil, nil, fmt.Errorf("payment: routing: %w", err)
-	}
-
-	gateway := decision.SelectedGateway
 
 	timeout, err := s.config.GetProcessingTimeout(ctx, gateway, string(in.PaymentMethod))
 	if err != nil {
-		return nil, nil, fmt.Errorf("payment: processing timeout for %s/%s: %w", gateway, in.PaymentMethod, err)
+		return CreateResult{}, fmt.Errorf("payment: processing timeout for %s/%s: %w", gateway, in.PaymentMethod, err)
 	}
-
 	timeoutSec := int(timeout.Seconds())
 	if timeoutSec <= 0 {
-		return nil, nil, fmt.Errorf("payment: invalid processing timeout %s for %s/%s", timeout, gateway, in.PaymentMethod)
+		return CreateResult{}, fmt.Errorf("payment: invalid processing timeout %s for %s/%s", timeout, gateway, in.PaymentMethod)
+	}
+
+	identity := in.TenantID
+	if identity == uuid.Nil {
+		return CreateResult{}, fmt.Errorf("payment: tenant_id is required")
 	}
 
 	txn, err := transaction.New(
-		in.MerchantID,
+		identity,
+		in.UserID,
 		in.Amount,
 		in.Currency,
 		in.PaymentMethod,
@@ -252,49 +312,185 @@ func (s *Service) buildTransaction(ctx context.Context, in CreatePaymentInput) (
 		timeoutSec,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("payment: build transaction: %w", err)
+		return CreateResult{}, fmt.Errorf("payment: build transaction: %w", err)
 	}
+	txn.TenantID = identity
+	txn.UserID = in.UserID
 	txn.AttemptedGateway = gateway
+	txn.CallbackURL = in.CallbackURL
+	txn.RedirectURL = in.RedirectURL
 
-	payload, err := json.Marshal(paymentCreatedPayload{
-		TransactionID:    txn.ID.String(),
-		MerchantID:       txn.MerchantID.String(),
-		Amount:           txn.Amount,
-		Currency:         txn.Currency,
-		PaymentMethod:    string(txn.PaymentMethod),
-		Gateway:          gateway,
-		Status:           string(txn.Status),
-		CreatedAt:        txn.CreatedAt.Format(time.RFC3339Nano),
+	if feeModel, err := s.config.GetFeeModel(ctx, gateway, string(in.PaymentMethod)); err == nil && feeModel != nil {
+		fee := feeModel.CalculateFee(in.Amount, 0)
+		txn.GatewayFeeEstimate = &fee
+		txn.GatewayFeeCurrency = in.Currency
+		txn.GatewayFeeModelVersion = 1
+	}
+
+	rawToken, tokenHash, err := GenerateToken()
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("payment: generate token: %w", err)
+	}
+	txn.TokenHash = tokenHash
+
+	createdPayload, _ := json.Marshal(transactionCreatedPayload{
+		TransactionID: txn.ID.String(),
+		TenantID:      txn.TenantID.String(),
+		UserID:        txn.UserID.String(),
+		Amount:        txn.Amount,
+		Currency:      txn.Currency,
+		PaymentMethod: string(txn.PaymentMethod),
+		Gateway:       gateway,
+		Status:        string(txn.Status),
+		CreatedAt:     txn.CreatedAt.Format(time.RFC3339Nano),
 		AggregateVersion: txn.Version,
 	})
+
+	initiatePayload, _ := json.Marshal(gatewayInitiatePayload{
+		TransactionID: txn.ID.String(),
+		TenantID:      txn.TenantID.String(),
+		GatewayID:     gateway,
+	})
+
+	events := []ports.OutboxEvent{
+		{
+			AggregateID:      txn.ID,
+			AggregateType:    "transaction",
+			EventType:        ports.EventTypeTransactionCreated,
+			Payload:          createdPayload,
+			EventVersion:     1,
+			AggregateVersion: txn.Version,
+		},
+		{
+			AggregateID:      txn.ID,
+			AggregateType:    "transaction",
+			EventType:        ports.EventTypeGatewayInitiate,
+			Payload:          initiatePayload,
+			EventVersion:     1,
+			AggregateVersion: txn.Version,
+		},
+	}
+
+	if s.idem == nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context) error {
+			if err := s.repo.Insert(ctx, txn); err != nil {
+				return fmt.Errorf("insert transaction: %w", err)
+			}
+			if s.audit != nil {
+				_ = s.audit.WriteEntry(ctx, &ports.AuditEntry{
+					TransactionID: &txn.ID,
+					EventType:     ports.AuditEventTypeStateChange,
+					Actor:         string(transaction.ActorSystem),
+					NewState:      string(txn.Status),
+					Reason:        "payment_created",
+				})
+			}
+			for i := range events {
+				if err := s.outbox.Write(ctx, events[i]); err != nil {
+					return fmt.Errorf("write outbox event %s: %w", events[i].EventType, err)
+				}
+			}
+			return nil
+		}); err != nil {
+			return CreateResult{}, err
+		}
+		s.logCreated(txn)
+		reloaded, err := s.syncInitiate(ctx, txn)
+		if err != nil {
+			return CreateResult{Verdict: idempotency.Created, Transaction: reloaded, Token: rawToken}, err
+		}
+		return CreateResult{Verdict: idempotency.Created, Transaction: reloaded, Token: rawToken}, nil
+	}
+
+	if in.IdempotencyKey == "" {
+		return CreateResult{}, idempotency.ErrKeyRequired
+	}
+	composite := idempotency.Composite(identityKey(CreateInput{TenantID: in.TenantID}), "create_payment", in.IdempotencyKey)
+	requestHash := idempotency.RequestHash(
+		identityKey(CreateInput{TenantID: in.TenantID}),
+		strconv.FormatInt(in.Amount, 10),
+		in.Currency,
+		string(in.PaymentMethod),
+		in.CallbackURL,
+		in.RedirectURL,
+	)
+
+	res, err := s.idem.Execute(ctx, composite, requestHash, func(ctx context.Context) ([]byte, error) {
+		if err := s.repo.Insert(ctx, txn); err != nil {
+			return nil, fmt.Errorf("insert transaction: %w", err)
+		}
+		if s.audit != nil {
+			_ = s.audit.WriteEntry(ctx, &ports.AuditEntry{
+				TransactionID: &txn.ID,
+				EventType:     ports.AuditEventTypeStateChange,
+				Actor:         string(transaction.ActorSystem),
+				NewState:      string(txn.Status),
+				Reason:        "payment_created",
+			})
+		}
+		for i := range events {
+			if err := s.outbox.Write(ctx, events[i]); err != nil {
+				return nil, fmt.Errorf("write outbox event %s: %w", events[i].EventType, err)
+			}
+		}
+		return json.Marshal(idempotencyTransactionResponse{TransactionID: txn.ID.String(), Token: rawToken})
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("payment: marshal created event: %w", err)
+		return CreateResult{}, err
 	}
 
-	return txn, &ports.OutboxEvent{
-		AggregateID:      txn.ID,
-		AggregateType:    "transaction",
-		EventType:        ports.EventTypePaymentCreated,
-		Payload:          payload,
-		EventVersion:     1,
-		AggregateVersion: txn.Version,
-	}, nil
+	switch res.Verdict {
+	case idempotency.Created:
+		s.logCreated(txn)
+		reloaded, err := s.syncInitiate(ctx, txn)
+		if err != nil {
+			return CreateResult{Verdict: res.Verdict, Transaction: reloaded, Token: rawToken}, err
+		}
+		return CreateResult{Verdict: res.Verdict, Transaction: reloaded, Token: rawToken}, nil
+	case idempotency.Replayed:
+		var stored idempotencyTransactionResponse
+		if err := json.Unmarshal(res.Response, &stored); err != nil {
+			return CreateResult{}, fmt.Errorf("payment: decode idempotent response: %w", err)
+		}
+		id, err := uuid.Parse(stored.TransactionID)
+		if err != nil {
+			return CreateResult{}, fmt.Errorf("payment: bad stored transaction id: %w", err)
+		}
+		reloaded, err := s.repo.GetByID(ctx, id)
+		if err != nil {
+			return CreateResult{}, fmt.Errorf("payment: reload idempotent transaction %s: %w", id, err)
+		}
+		reloaded, _ = s.syncInitiate(ctx, reloaded)
+		return CreateResult{Verdict: res.Verdict, Transaction: reloaded, Token: stored.Token}, nil
+	default:
+		return CreateResult{Verdict: res.Verdict}, nil
+	}
 }
 
-func (s *Service) insertTransaction(ctx context.Context, txn *transaction.Transaction, event *ports.OutboxEvent) error {
-	if err := s.repo.Insert(ctx, txn); err != nil {
-		return fmt.Errorf("insert transaction: %w", err)
+func (s *Service) syncInitiate(ctx context.Context, txn *transaction.Txn) (*transaction.Txn, error) {
+	if err := s.ProcessGatewayInitiate(ctx, txn.ID); err != nil {
+		s.log.Warn("payment.sync_initiate_failed", map[string]any{
+			"transaction_id": txn.ID.String(),
+			"error":          err.Error(),
+		})
+		reloaded, loadErr := s.repo.GetByID(ctx, txn.ID)
+		if loadErr != nil {
+			return txn, err
+		}
+		return reloaded, err
 	}
-	if err := s.outbox.Write(ctx, *event); err != nil {
-		return fmt.Errorf("write outbox event: %w", err)
+	reloaded, err := s.repo.GetByID(ctx, txn.ID)
+	if err != nil {
+		return txn, nil
 	}
-	return nil
+	return reloaded, nil
 }
 
-func (s *Service) logCreated(txn *transaction.Transaction) {
+func (s *Service) logCreated(txn *transaction.Txn) {
 	s.log.Info(ports.LogEventTransactionCreated, map[string]any{
 		ports.FieldTransactionID: txn.ID.String(),
-		ports.FieldMerchantID:    txn.MerchantID.String(),
+		ports.FieldTenantID:      txn.TenantID.String(),
+		ports.FieldUserID:        txn.UserID.String(),
 		ports.FieldGatewayID:     txn.GatewayID,
 		ports.FieldPaymentMethod: string(txn.PaymentMethod),
 	})
@@ -304,14 +500,12 @@ func (s *Service) logCreated(txn *transaction.Transaction) {
 	})
 }
 
-func createRequestHash(in CreatePaymentInput) string {
-	return idempotency.RequestHash(
-		in.MerchantID.String(),
-		strconv.FormatInt(in.Amount, 10),
-		in.Currency,
-		string(in.PaymentMethod),
-		in.CustomerID.String(),
-		in.CustomerEmail,
-		in.Description,
-	)
+func identityKey(in CreateInput) string {
+	return in.TenantID.String()
 }
+
+func (s *Service) ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
+	return s.repo.List(ctx, filter)
+}
+
+

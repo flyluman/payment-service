@@ -9,28 +9,40 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
-func newTestAdapter(handler http.HandlerFunc) (*Adapter, *httptest.Server) {
-	srv := httptest.NewServer(handler)
-	a := New(Config{APIKey: "sk_test_x", BaseURL: srv.URL, HTTPClient: srv.Client()})
-	return a, srv
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func newTestAdapter(handler http.HandlerFunc) *Adapter {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		return rec.Result(), nil
+	})}
+	return New(Config{
+		HTTPClient: client,
+		ResolveConfig: func(_ context.Context, _ uuid.UUID) (*TenantConfig, error) {
+			return &TenantConfig{APIKey: "sk_test_x", BaseURL: "https://example.invalid"}, nil
+		},
+	})
 }
 
 func TestInitiatePayment_Success(t *testing.T) {
 	var gotPath, gotMethod, gotIdem, gotAuth string
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotMethod = r.URL.Path, r.Method
 		gotIdem = r.Header.Get("Idempotency-Key")
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"pi_123","status":"succeeded","amount":150000,"currency":"usd","metadata":{"transaction_id":"abc"}}`))
 	})
-	defer srv.Close()
 
 	resp, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{
 		TransactionID: uuid.New(),
+		TenantID:      uuid.New(),
 		Amount:        150000,
 		Currency:      "USD",
 		AttemptNumber: 1,
@@ -61,17 +73,16 @@ func TestInitiatePayment_Success(t *testing.T) {
 
 func TestInitiatePayment_ExtractsFeesAndCardFromLatestCharge(t *testing.T) {
 	var expand []string
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		expand = r.Form["expand[]"]
 		_, _ = w.Write([]byte(`{"id":"pi_1","status":"succeeded","amount":150000,"currency":"usd",
 			"latest_charge":{"id":"ch_1","balance_transaction":{"fee":4350},
 			"payment_method_details":{"card":{"brand":"visa","last4":"4242","network":"visa"}}}}`))
 	})
-	defer srv.Close()
 
 	resp, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{
-		TransactionID: uuid.New(), Amount: 150000, Currency: "USD", AttemptNumber: 1,
+		TransactionID: uuid.New(), TenantID: uuid.New(), Amount: 150000, Currency: "USD", AttemptNumber: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -90,14 +101,14 @@ func TestInitiatePayment_ExtractsFeesAndCardFromLatestCharge(t *testing.T) {
 
 func TestInitiatePayment_UsesProvidedIdempotencyKey(t *testing.T) {
 	var gotIdem string
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		gotIdem = r.Header.Get("Idempotency-Key")
 		_, _ = w.Write([]byte(`{"id":"pi_1","status":"processing","amount":1,"currency":"usd"}`))
 	})
-	defer srv.Close()
 
 	_, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{
 		TransactionID:  uuid.New(),
+		TenantID:       uuid.New(),
 		Amount:         1,
 		Currency:       "USD",
 		IdempotencyKey: "stored-key-123",
@@ -111,13 +122,12 @@ func TestInitiatePayment_UsesProvidedIdempotencyKey(t *testing.T) {
 }
 
 func TestInitiatePayment_CardDeclined(t *testing.T) {
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusPaymentRequired)
 		_, _ = w.Write([]byte(`{"error":{"type":"card_error","code":"card_declined","decline_code":"generic_decline","message":"Your card was declined."}}`))
 	})
-	defer srv.Close()
 
-	_, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{TransactionID: uuid.New(), Amount: 1, Currency: "USD"})
+	_, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{TransactionID: uuid.New(), TenantID: uuid.New(), Amount: 1, Currency: "USD"})
 	var gwErr *ports.GatewayError
 	if !errors.As(err, &gwErr) {
 		t.Fatalf("expected *ports.GatewayError, got %v", err)
@@ -131,13 +141,12 @@ func TestInitiatePayment_CardDeclined(t *testing.T) {
 }
 
 func TestInitiatePayment_InsufficientFundsIsSoftDecline(t *testing.T) {
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusPaymentRequired)
 		_, _ = w.Write([]byte(`{"error":{"type":"card_error","code":"card_declined","decline_code":"insufficient_funds","message":"Insufficient funds."}}`))
 	})
-	defer srv.Close()
 
-	_, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{TransactionID: uuid.New(), Amount: 1, Currency: "USD"})
+	_, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{TransactionID: uuid.New(), TenantID: uuid.New(), Amount: 1, Currency: "USD"})
 	var gwErr *ports.GatewayError
 	if !errors.As(err, &gwErr) {
 		t.Fatalf("expected *ports.GatewayError, got %v", err)
@@ -151,15 +160,16 @@ func TestInitiatePayment_InsufficientFundsIsSoftDecline(t *testing.T) {
 }
 
 func TestCheckStatus(t *testing.T) {
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	txnID := uuid.New()
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/payment_intents/pi_check" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"id":"pi_check","status":"processing","amount":5000,"currency":"inr"}`))
+		_, _ = w.Write([]byte(`{"id":"pi_check","status":"processing","amount":5000,"currency":"bdt"}`))
 	})
-	defer srv.Close()
+	a.txnTenants.Store(txnID, uuid.New())
 
-	resp, err := a.CheckStatus(context.Background(), ports.GatewayStatusRequest{GatewayReferenceID: "pi_check"})
+	resp, err := a.CheckStatus(context.Background(), ports.GatewayStatusRequest{TransactionID: txnID, GatewayReferenceID: "pi_check"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,16 +179,18 @@ func TestCheckStatus(t *testing.T) {
 }
 
 func TestRefund(t *testing.T) {
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	txnID := uuid.New()
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/refunds" {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{"id":"re_1","status":"succeeded","amount":5000,"currency":"usd"}`))
 	})
-	defer srv.Close()
+	a.txnTenants.Store(txnID, uuid.New())
 
 	resp, err := a.Refund(context.Background(), ports.GatewayRefundRequest{
 		RefundID:           uuid.New(),
+		TransactionID:      txnID,
 		GatewayReferenceID: "pi_1",
 		Amount:             5000,
 	})
@@ -191,15 +203,16 @@ func TestRefund(t *testing.T) {
 }
 
 func TestCancel(t *testing.T) {
-	a, srv := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
+	txnID := uuid.New()
+	a := newTestAdapter(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/payment_intents/pi_c/cancel" {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{"id":"pi_c","status":"canceled","amount":1,"currency":"usd"}`))
 	})
-	defer srv.Close()
+	a.txnTenants.Store(txnID, uuid.New())
 
-	resp, err := a.Cancel(context.Background(), ports.GatewayCancelRequest{GatewayReferenceID: "pi_c"})
+	resp, err := a.Cancel(context.Background(), ports.GatewayCancelRequest{TransactionID: txnID, GatewayReferenceID: "pi_c"})
 	if err != nil {
 		t.Fatal(err)
 	}

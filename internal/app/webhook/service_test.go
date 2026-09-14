@@ -6,19 +6,19 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type fakeTxns struct {
-	txn     *transaction.Transaction
+	txn     *transaction.Txn
 	updates int
 }
 
-func (f *fakeTxns) GetByGatewayReference(context.Context, string, string) (*transaction.Transaction, error) {
+func (f *fakeTxns) GetByGatewayReference(context.Context, string, string) (*transaction.Txn, error) {
 	return f.txn, nil
 }
-func (f *fakeTxns) UpdateStatus(_ context.Context, t *transaction.Transaction) error {
+func (f *fakeTxns) UpdateStatus(_ context.Context, t *transaction.Txn) error {
 	f.updates++
 	return nil
 }
@@ -31,7 +31,7 @@ type fakeWebhooks struct {
 func (f *fakeWebhooks) RecordEvent(context.Context, string, string) (bool, error) {
 	return f.recorded, nil
 }
-func (f *fakeWebhooks) InsertRawMetadata(context.Context, uuid.UUID, string, []byte) error {
+func (f *fakeWebhooks) InsertGatewayMetadata(context.Context, uuid.UUID, string, []byte) error {
 	f.rawCount++
 	return nil
 }
@@ -64,8 +64,8 @@ func (noopMetrics) Increment(string, map[string]string)          {}
 func (noopMetrics) Histogram(string, float64, map[string]string) {}
 func (noopMetrics) Gauge(string, float64, map[string]string)     {}
 
-func processingTxn() *transaction.Transaction {
-	t, _ := transaction.New(uuid.New(), 150000, "INR", transaction.PaymentMethodCard, "razorpay", uuid.New(), "b@e.com", "o", nil, 30)
+func processingTxn() *transaction.Txn {
+	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "razorpay", uuid.New(), "b@e.com", "o", nil, 30)
 	t.Status = transaction.StatusProcessing
 	t.GatewayReferenceID = "order_1"
 	return t
@@ -88,7 +88,7 @@ func TestProcess_ResolvesProcessingToSucceeded(t *testing.T) {
 	if txns.updates != 1 || len(outbox.events) != 1 || webhooks.rawCount != 1 {
 		t.Errorf("expected update+event+raw metadata, got updates=%d events=%d raw=%d", txns.updates, len(outbox.events), webhooks.rawCount)
 	}
-	if outbox.events[0].EventType != ports.EventTypePaymentSucceeded {
+	if outbox.events[0].EventType != ports.EventTypeTransactionSucceeded {
 		t.Errorf("expected PAYMENT_SUCCEEDED, got %s", outbox.events[0].EventType)
 	}
 }

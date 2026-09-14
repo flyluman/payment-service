@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,43 +12,60 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 const defaultOutboxClaimTTL = 60 * time.Second
+const defaultShardCount = 64
 
 type OutboxWriter struct {
-	db       *DB
-	q        *Queries
-	claimTTL time.Duration
+	db         *DB
+	claimTTL   time.Duration
+	shardCount int
+	log        ports.Logger
 }
 
-type MerchantWebhookWriter struct {
+type TenantWebhookWriter struct {
 	db *DB
-	q  *Queries
 }
 
 var (
 	_ ports.OutboxWriter          = (*OutboxWriter)(nil)
-	_ ports.MerchantWebhookWriter = (*MerchantWebhookWriter)(nil)
+	_ ports.TenantWebhookWriter = (*TenantWebhookWriter)(nil)
 )
 
 type txKey struct{}
 
-func NewOutboxWriter(db *DB, q *Queries) *OutboxWriter {
-	return &OutboxWriter{db: db, q: q, claimTTL: defaultOutboxClaimTTL}
+func NewOutboxWriter(db *DB) *OutboxWriter {
+	return &OutboxWriter{db: db, claimTTL: defaultOutboxClaimTTL, shardCount: defaultShardCount}
 }
 
-// SetClaimTTL controls how long a claimed (PUBLISHING) event stays invisible to
-// other pollers before it is treated as an abandoned claim and reclaimed. It
-// must comfortably exceed the time to publish one batch.
+func (w *OutboxWriter) SetShardCount(n int) {
+	if n > 1 {
+		w.shardCount = n
+	}
+}
+
+func (w *OutboxWriter) SetLogger(log ports.Logger) {
+	w.log = log
+}
+
+// ShardIndex computes the shard index for a given aggregate ID.
+// Deterministic: same aggregateID + shardCount always returns same shard.
+func ShardIndex(aggregateID uuid.UUID, shardCount int) int {
+	h := fnv.New32a()
+	h.Write(aggregateID[:])
+	return int(h.Sum32() % uint32(shardCount))
+}
+
 func (w *OutboxWriter) SetClaimTTL(d time.Duration) {
 	if d > 0 {
 		w.claimTTL = d
 	}
 }
-func NewMerchantWebhookWriter(db *DB, q *Queries) *MerchantWebhookWriter {
-	return &MerchantWebhookWriter{db: db, q: q}
+
+func NewTenantWebhookWriter(db *DB) *TenantWebhookWriter {
+	return &TenantWebhookWriter{db: db}
 }
 
 func WithTx(ctx context.Context, tx pgx.Tx) context.Context {
@@ -61,7 +80,7 @@ func (w *OutboxWriter) Write(ctx context.Context, event ports.OutboxEvent) error
 
 	id := event.ID
 	if id == uuid.Nil {
-		id = uuid.New()
+		id = uuid.Must(uuid.NewV7())
 	}
 
 	var nextAttempt any
@@ -74,9 +93,15 @@ func (w *OutboxWriter) Write(ctx context.Context, event ports.OutboxEvent) error
 		version = 1
 	}
 
-	_, err = tx.Exec(ctx, w.q.OutboxInsert,
+	shard := ShardIndex(event.AggregateID, w.shardCount)
+
+	_, err = tx.Exec(ctx, `INSERT INTO outbox_events
+    (id, aggregate_id, aggregate_type, event_type, payload, shard_index,
+     event_version, aggregate_version, status, created_at, next_attempt_at, attempts)
+VALUES
+    ($1, $2, $3, $4, $5, $6, $7, $8, 'PENDING', NOW(), COALESCE($9, NOW()), 0)`,
 		id, event.AggregateID, event.AggregateType, event.EventType,
-		string(event.Payload), version, event.AggregateVersion, nextAttempt,
+		string(event.Payload), shard, version, event.AggregateVersion, nextAttempt,
 	)
 	if err != nil {
 		return fmt.Errorf("outbox: write event %s: %w", event.EventType, err)
@@ -85,7 +110,9 @@ func (w *OutboxWriter) Write(ctx context.Context, event ports.OutboxEvent) error
 }
 
 func (w *OutboxWriter) MarkPublished(ctx context.Context, id uuid.UUID, createdAt time.Time) error {
-	tag, err := w.db.pool.Exec(ctx, w.q.OutboxMarkPublished, id, createdAt)
+	tag, err := w.db.pool.Exec(ctx, `UPDATE outbox_events
+SET status = 'PUBLISHED', published_at = NOW(), locked_at = NULL
+WHERE id = $1 AND created_at = $2 AND status = 'PUBLISHING'`, id, createdAt)
 	if err != nil {
 		return fmt.Errorf("outbox: mark published %s: %w", id, err)
 	}
@@ -96,7 +123,14 @@ func (w *OutboxWriter) MarkPublished(ctx context.Context, id uuid.UUID, createdA
 }
 
 func (w *OutboxWriter) MarkFailed(ctx context.Context, id uuid.UUID, createdAt time.Time, lastErr string, nextAttempt time.Time) error {
-	tag, err := w.db.pool.Exec(ctx, w.q.OutboxMarkFailed, id, createdAt, lastErr, nextAttempt)
+	tag, err := w.db.pool.Exec(ctx, `UPDATE outbox_events
+SET
+    status          = 'PENDING',
+    attempts        = attempts + 1,
+    last_error      = $3,
+    next_attempt_at = $4,
+    locked_at       = NULL
+WHERE id = $1 AND created_at = $2 AND status = 'PUBLISHING'`, id, createdAt, lastErr, nextAttempt)
 	if err != nil {
 		return fmt.Errorf("outbox: mark failed %s: %w", id, err)
 	}
@@ -117,7 +151,10 @@ func (w *OutboxWriter) MarkExhausted(ctx context.Context, id uuid.UUID, createdA
 			AggregateVersion int
 		}
 
-		err := tx.QueryRow(ctx, w.q.OutboxMarkExhausted, id, createdAt, lastErr).Scan(
+		err := tx.QueryRow(ctx, `UPDATE outbox_events
+SET status = 'FAILED', last_error = $3, locked_at = NULL
+WHERE id = $1 AND created_at = $2 AND status = 'PUBLISHING'
+RETURNING aggregate_id, aggregate_type, event_type, payload, event_version, aggregate_version`, id, createdAt, lastErr).Scan(
 			&event.AggregateID, &event.AggregateType,
 			&event.EventType, &event.Payload, &event.EventVersion, &event.AggregateVersion,
 		)
@@ -125,7 +162,10 @@ func (w *OutboxWriter) MarkExhausted(ctx context.Context, id uuid.UUID, createdA
 			return fmt.Errorf("outbox: exhaust event %s: %w", id, err)
 		}
 
-		_, err = tx.Exec(ctx, w.q.OutboxDeadLetterInsert,
+		_, err = tx.Exec(ctx, `INSERT INTO outbox_dead_letters
+    (id, original_event_id, aggregate_id, aggregate_type, event_type, payload, event_version, aggregate_version, failure_reason, failed_at)
+VALUES
+    (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
 			id, event.AggregateID, event.AggregateType,
 			event.EventType, string(event.Payload), event.EventVersion, event.AggregateVersion, lastErr,
 		)
@@ -133,16 +173,20 @@ func (w *OutboxWriter) MarkExhausted(ctx context.Context, id uuid.UUID, createdA
 			return fmt.Errorf("outbox: write dead letter for %s: %w", id, err)
 		}
 
+		if w.log != nil {
+			w.log.Error(ports.LogEventOutboxDeadLetter, map[string]any{
+				"event_id":      id,
+				"event_type":    event.EventType,
+				"aggregate_id":  event.AggregateID,
+				"aggregate_type": event.AggregateType,
+				"failure_reason": lastErr,
+			}, nil)
+		}
+
 		return nil
 	})
 }
 
-// PollPending atomically claims a batch of due events (PENDING, or a PUBLISHING
-// row whose claim has gone stale past claimTTL), transitioning them to
-// PUBLISHING and returning them. Because the claim is committed before the
-// caller publishes, a second poller no longer sees the same rows — the previous
-// FOR UPDATE SKIP LOCKED SELECT released its lock at commit, before publishing,
-// so two workers could fetch and publish the same event.
 func (w *OutboxWriter) PollPending(ctx context.Context, shards []int, batchSize int) ([]ports.PendingEvent, error) {
 	claimTTLSec := int64(w.claimTTL.Seconds())
 
@@ -154,7 +198,24 @@ func (w *OutboxWriter) PollPending(ctx context.Context, shards []int, batchSize 
 		shardArg[i] = int32(s)
 	}
 
-	rows, err := w.db.pool.Query(ctx, w.q.OutboxPollPending, shardArg, batchSize, claimTTLSec)
+	rows, err := w.db.pool.Query(ctx, `UPDATE outbox_events o
+SET status = 'PUBLISHING', locked_at = NOW()
+FROM (
+    SELECT id, created_at
+    FROM outbox_events
+    WHERE shard_index = ANY($1::int[])
+      AND next_attempt_at <= NOW()
+      AND (
+            status = 'PENDING'
+         OR (status = 'PUBLISHING' AND locked_at < NOW() - make_interval(secs => $3))
+      )
+    ORDER BY attempts ASC, created_at ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT $2
+) AS claimed
+WHERE o.id = claimed.id AND o.created_at = claimed.created_at
+RETURNING o.id, o.aggregate_id, o.aggregate_type, o.event_type,
+          o.payload, o.event_version, o.aggregate_version, o.attempts, o.created_at`, shardArg, batchSize, claimTTLSec)
 	if err != nil {
 		return nil, fmt.Errorf("outbox: poll pending: %w", err)
 	}
@@ -175,7 +236,7 @@ func (w *OutboxWriter) PollPending(ctx context.Context, shards []int, batchSize 
 }
 
 func (w *OutboxWriter) ReplayDeadLetter(ctx context.Context, deadLetterID uuid.UUID, actor, reason string) (uuid.UUID, error) {
-	newEventID := uuid.New()
+	newEventID := uuid.Must(uuid.NewV7())
 
 	err := withTx(ctx, w.db.pool, func(tx pgx.Tx) error {
 		var dl struct {
@@ -188,7 +249,9 @@ func (w *OutboxWriter) ReplayDeadLetter(ctx context.Context, deadLetterID uuid.U
 			ResolvedAt       *time.Time
 		}
 
-		err := tx.QueryRow(ctx, w.q.OutboxDeadLetterGet, deadLetterID).Scan(
+		err := tx.QueryRow(ctx, `SELECT aggregate_id, aggregate_type, event_type, payload, event_version, aggregate_version, resolved_at
+FROM outbox_dead_letters
+WHERE id = $1`, deadLetterID).Scan(
 			&dl.AggregateID, &dl.AggregateType, &dl.EventType,
 			&dl.Payload, &dl.EventVersion, &dl.AggregateVersion, &dl.ResolvedAt,
 		)
@@ -199,15 +262,22 @@ func (w *OutboxWriter) ReplayDeadLetter(ctx context.Context, deadLetterID uuid.U
 			return fmt.Errorf("outbox: dead letter %s already resolved", deadLetterID)
 		}
 
-		_, err = tx.Exec(ctx, w.q.OutboxReplayInsert,
+		shard := ShardIndex(dl.AggregateID, w.shardCount)
+		_, err = tx.Exec(ctx, `INSERT INTO outbox_events
+    (id, aggregate_id, aggregate_type, event_type, payload, shard_index,
+     event_version, aggregate_version, status, created_at, next_attempt_at, attempts)
+VALUES
+    ($1, $2, $3, $4, $5, $6, $7, $8, 'PENDING', NOW(), NOW(), 0)`,
 			newEventID, dl.AggregateID, dl.AggregateType,
-			dl.EventType, string(dl.Payload), dl.EventVersion, dl.AggregateVersion,
+			dl.EventType, string(dl.Payload), shard, dl.EventVersion, dl.AggregateVersion,
 		)
 		if err != nil {
 			return fmt.Errorf("outbox: re-enqueue dead letter %s: %w", deadLetterID, err)
 		}
 
-		_, err = tx.Exec(ctx, w.q.OutboxDeadLetterResolve, deadLetterID, actor)
+		_, err = tx.Exec(ctx, `UPDATE outbox_dead_letters
+SET resolved_at = NOW(), resolved_by = $2
+WHERE id = $1`, deadLetterID, actor)
 		if err != nil {
 			return fmt.Errorf("outbox: resolve dead letter %s: %w", deadLetterID, err)
 		}
@@ -218,7 +288,75 @@ func (w *OutboxWriter) ReplayDeadLetter(ctx context.Context, deadLetterID uuid.U
 	return newEventID, err
 }
 
-func (w *MerchantWebhookWriter) WriteDelivery(ctx context.Context, d ports.MerchantWebhookDelivery) error {
+func (w *OutboxWriter) ListDeadLetters(ctx context.Context, filter ports.DeadLetterFilter) ([]ports.DeadLetter, error) {
+	query := `
+		SELECT id, aggregate_id, aggregate_type, event_type, payload, event_version, aggregate_version,
+		       COALESCE(error_message, failure_reason), attempts, COALESCE(created_at, failed_at), resolved_at, resolved_by
+		FROM outbox_dead_letters WHERE 1=1
+	`
+	args := []any{}
+	argIdx := 1
+
+	if filter.Resolved != nil {
+		if *filter.Resolved {
+			query += " AND resolved_at IS NOT NULL"
+		} else {
+			query += " AND resolved_at IS NULL"
+		}
+	}
+	if filter.EventType != nil {
+		query += " AND event_type = $" + strconv.Itoa(argIdx)
+		args = append(args, *filter.EventType)
+		argIdx++
+	}
+	if filter.DateFrom != nil {
+		query += " AND created_at >= $" + strconv.Itoa(argIdx)
+		args = append(args, *filter.DateFrom)
+		argIdx++
+	}
+	if filter.DateTo != nil {
+		query += " AND created_at <= $" + strconv.Itoa(argIdx)
+		args = append(args, *filter.DateTo)
+		argIdx++
+	}
+
+	query += " ORDER BY created_at DESC"
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	query += " LIMIT $" + strconv.Itoa(argIdx)
+	args = append(args, limit+1)
+
+	rows, err := w.db.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var letters []ports.DeadLetter
+	for rows.Next() {
+		var dl ports.DeadLetter
+		if err := rows.Scan(&dl.ID, &dl.AggregateID, &dl.AggregateType, &dl.EventType,
+			&dl.Payload, &dl.EventVersion, &dl.AggregateVersion,
+			&dl.ErrorMessage, &dl.Attempts, &dl.CreatedAt, &dl.ResolvedAt, &dl.ResolvedBy); err != nil {
+			return nil, err
+		}
+		letters = append(letters, dl)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(letters) > limit {
+		letters = letters[:limit]
+	}
+
+	return letters, nil
+}
+
+func (w *TenantWebhookWriter) WriteDelivery(ctx context.Context, d ports.TenantWebhookDelivery) error {
 	tx, err := txFromContext(ctx)
 	if err != nil {
 		return err
@@ -226,11 +364,15 @@ func (w *MerchantWebhookWriter) WriteDelivery(ctx context.Context, d ports.Merch
 
 	id := d.ID
 	if id == uuid.Nil {
-		id = uuid.New()
+		id = uuid.Must(uuid.NewV7())
 	}
 
-	_, err = tx.Exec(ctx, w.q.MerchantWebhookInsert,
-		id, d.MerchantID, d.TransactionID,
+	_, err = tx.Exec(ctx, `INSERT INTO tenant_webhook_deliveries
+    (id, tenant_id, transaction_id, event_type, payload, endpoint_url,
+     status, attempts, next_attempt_at, created_at)
+VALUES
+    ($1, $2, $3, $4, $5, $6, 'PENDING', 0, NOW(), NOW())`,
+		id, d.TenantID, d.TransactionID,
 		d.EventType, string(d.Payload), d.EndpointURL,
 	)
 	if err != nil {
@@ -258,6 +400,13 @@ func queryer(ctx context.Context, pool *pgxpool.Pool) Queryer {
 		return tx
 	}
 	return pool
+}
+
+func readQueryer(ctx context.Context, db *DB) Queryer {
+	if tx, ok := ctx.Value(txKey{}).(pgx.Tx); ok && tx != nil {
+		return tx
+	}
+	return db.ReadPool()
 }
 
 func withTx(ctx context.Context, pool interface {

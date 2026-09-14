@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type RetryPolicy struct {

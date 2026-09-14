@@ -5,8 +5,9 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 const levelTrace = slog.Level(-8)
@@ -15,19 +16,45 @@ type SlogLogger struct {
 	base *slog.Logger
 }
 
-func NewSlogLogger(level slog.Level) *SlogLogger {
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	return &SlogLogger{base: slog.New(h)}
+func NewSlogLogger(level slog.Level, svcName, svcVersion, env, hostname string) *SlogLogger {
+	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				a.Key = "timestamp"
+				a.Value = slog.StringValue(a.Value.Time().UTC().Format(time.RFC3339Nano))
+			}
+			return a
+		},
+	})
+	base := slog.New(h).With(
+		"service",     svcName,
+		"version",     svcVersion,
+		"environment", env,
+		"hostname",    hostname,
+	)
+	return &SlogLogger{base: base}
 }
 
-const redactedValue = "[REDACTED]"
+const redactedValue = "<redacted>"
 
 var sensitiveLogKeys = map[string]struct{}{
-	"vpa":         {},
-	"card_number": {},
-	"pan":         {},
-	"cvv":         {},
-	"card_cvv":    {},
+	"vpa":              {},
+	"card_number":      {},
+	"pan":              {},
+	"cvv":              {},
+	"card_cvv":         {},
+	"token":            {},
+	"api_key":          {},
+	"client_secret":    {},
+	"client_id":        {},
+	"access_token":     {},
+	"key_secret":       {},
+	"publishable_key":  {},
+	"webhook_secret":   {},
+	"authorization":    {},
+	"bearer":           {},
+	"password":         {},
 }
 
 func fieldsToAttrs(fields map[string]any) []any {

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 func rzpSig(secret string, body []byte) string {

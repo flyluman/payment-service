@@ -1,0 +1,27 @@
+DROP TRIGGER IF EXISTS trg_outbox_insert_notify ON outbox_events;
+DROP FUNCTION IF EXISTS notify_outbox_insert;
+
+DROP TABLE IF EXISTS partition_management_log;
+DROP TABLE IF EXISTS outbox_dead_letters;
+DROP TABLE IF EXISTS outbox_default;
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS notification_preferences;
+DROP TABLE IF EXISTS notification_templates;
+DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS dispute_evidence;
+DROP TABLE IF EXISTS disputes;
+DROP TABLE IF EXISTS tenant_webhook_configs;
+DROP TABLE IF EXISTS tenant_gateway_configs;
+DROP TABLE IF EXISTS tenant_webhook_deliveries;
+DROP TABLE IF EXISTS refunds;
+DROP TABLE IF EXISTS webhook_events;
+DROP TABLE IF EXISTS audit_log;
+DROP TABLE IF EXISTS transaction_gateway_metadata;
+DROP TABLE IF EXISTS processing_lease;
+DROP TABLE IF EXISTS idempotency_keys;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS gateway_circuit_breaker_state;
+DROP TABLE IF EXISTS gateway_metadata_schemas;
+DROP TABLE IF EXISTS gateway_fee_models;
+DROP TABLE IF EXISTS gateway_timeouts;
+DROP TABLE IF EXISTS gateway_config;

@@ -6,8 +6,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type ExpiredLeaseLister interface {
@@ -15,7 +15,7 @@ type ExpiredLeaseLister interface {
 }
 
 type LeaseRecoverer interface {
-	RecoverExpiredLease(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error)
+	RecoverExpiredLease(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
 }
 
 type IdempotencySweeper interface {

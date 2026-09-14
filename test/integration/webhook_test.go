@@ -8,23 +8,23 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/adapters/observability"
-	"samarth/payment-service/internal/adapters/postgres"
-	appwebhook "samarth/payment-service/internal/app/webhook"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/testsupport"
+	"github.com/crownroutes/payment-service/internal/adapters/observability"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
+	appwebhook "github.com/crownroutes/payment-service/internal/app/webhook"
+	"github.com/crownroutes/payment-service/internal/domain/payment"
+	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
-func seedProcessingTxn(t *testing.T, pg *testsupport.PG, gatewayID, reference string) *transaction.Transaction {
+func seedProcessingTxn(t *testing.T, pg *testsupport.PG, gatewayID, reference string) *payment.Payment {
 	t.Helper()
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewPaymentRepository(pg.DB, pg.Q)
 	tr := postgres.NewTransactor(pg.DB)
 
-	txn, err := transaction.New(uuid.New(), 150000, "INR", transaction.PaymentMethodCard, gatewayID, uuid.New(), "b@e.com", "o", nil, 30)
+	txn, err := payment.New(uuid.New(), 150000, "BDT", payment.PaymentMethodCard, gatewayID, uuid.New(), "b@e.com", "o", nil, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	txn.Status = transaction.StatusProcessing
+	txn.Status = payment.StatusProcessing
 	txn.GatewayReferenceID = reference
 	if err := tr.WithinTx(context.Background(), func(ctx context.Context) error { return repo.Insert(ctx, txn) }); err != nil {
 		t.Fatalf("seed processing txn: %v", err)
@@ -34,13 +34,13 @@ func seedProcessingTxn(t *testing.T, pg *testsupport.PG, gatewayID, reference st
 
 func TestWebhook_ResolvesProcessingTransaction(t *testing.T) {
 	pg := testsupport.RequirePostgres(t)
-	pg.Truncate(t, "transactions", "webhook_events", "transaction_raw_metadata", "outbox_events")
+	pg.Truncate(t, "transactions", "webhook_events", "transaction_gateway_metadata", "outbox_events")
 	ctx := context.Background()
 
 	txn := seedProcessingTxn(t, pg, "razorpay", "order_int")
 
 	svc := appwebhook.NewService(
-		postgres.NewTransactionRepository(pg.DB, pg.Q),
+		postgres.NewPaymentRepository(pg.DB, pg.Q),
 		postgres.NewWebhookRepository(pg.DB, pg.Q),
 		postgres.NewOutboxWriter(pg.DB, pg.Q),
 		postgres.NewTransactor(pg.DB),
@@ -54,17 +54,17 @@ func TestWebhook_ResolvesProcessingTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	if !out.Resolved || out.Status != transaction.StatusSucceeded {
+	if !out.Resolved || out.Status != payment.StatusSucceeded {
 		t.Fatalf("expected resolved to SUCCEEDED, got %+v", out)
 	}
 
-	persisted, _ := postgres.NewTransactionRepository(pg.DB, pg.Q).GetByID(ctx, txn.ID)
-	if persisted.Status != transaction.StatusSucceeded {
+	persisted, _ := postgres.NewPaymentRepository(pg.DB, pg.Q).GetByID(ctx, txn.ID)
+	if persisted.Status != payment.StatusSucceeded {
 		t.Errorf("transaction should be SUCCEEDED in DB, got %s", persisted.Status)
 	}
 
 	var rawCount, eventCount int
-	_ = pg.DB.Pool().QueryRow(ctx, "SELECT count(*) FROM transaction_raw_metadata WHERE transaction_id=$1", txn.ID).Scan(&rawCount)
+	_ = pg.DB.Pool().QueryRow(ctx, "SELECT count(*) FROM transaction_gateway_metadata WHERE transaction_id=$1", txn.ID).Scan(&rawCount)
 	_ = pg.DB.Pool().QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE aggregate_id=$1", txn.ID).Scan(&eventCount)
 	if rawCount != 1 {
 		t.Errorf("expected 1 raw metadata row, got %d", rawCount)
@@ -83,7 +83,7 @@ func TestWebhook_ResolvesProcessingTransaction(t *testing.T) {
 	if !again.Duplicate {
 		t.Errorf("replayed webhook should be a duplicate no-op, got %+v", again)
 	}
-	_ = pg.DB.Pool().QueryRow(ctx, "SELECT count(*) FROM transaction_raw_metadata WHERE transaction_id=$1", txn.ID).Scan(&rawCount)
+	_ = pg.DB.Pool().QueryRow(ctx, "SELECT count(*) FROM transaction_gateway_metadata WHERE transaction_id=$1", txn.ID).Scan(&rawCount)
 	if rawCount != 1 {
 		t.Errorf("duplicate webhook must not insert a second raw metadata row, got %d", rawCount)
 	}

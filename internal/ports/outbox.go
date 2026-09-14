@@ -40,16 +40,20 @@ type OutboxEvent struct {
 }
 
 const (
-	EventTypePaymentCreated   = "PAYMENT_CREATED"
-	EventTypePaymentSucceeded = "PAYMENT_SUCCEEDED"
-	EventTypePaymentFailed    = "PAYMENT_FAILED"
-	EventTypePaymentCancelled = "PAYMENT_CANCELLED"
+	EventTypeTransactionCreated   = "TRANSACTION_CREATED"
+	EventTypeTransactionSucceeded = "TRANSACTION_SUCCEEDED"
+	EventTypeTransactionFailed    = "TRANSACTION_FAILED"
+	EventTypeTransactionCancelled = "TRANSACTION_CANCELLED"
 
 	EventTypeRefundInitiated = "REFUND_INITIATED"
 	EventTypeRefundSucceeded = "REFUND_SUCCEEDED"
 	EventTypeRefundFailed    = "REFUND_FAILED"
 
 	EventTypeAuditStateChange = "AUDIT_STATE_CHANGE"
+
+	EventTypeTransactionCallback = "TRANSACTION_CALLBACK"
+
+	EventTypeGatewayInitiate = "GATEWAY_INITIATE"
 )
 
 type OutboxStatus string
@@ -70,20 +74,31 @@ type DeadLetter struct {
 	EventVersion     int
 	AggregateVersion int
 	FailureReason    string
+	ErrorMessage     string
+	Attempts         int
 	FailedAt         time.Time
+	CreatedAt        time.Time
 	ResolvedAt       *time.Time
 	ResolvedBy       string
 }
 
-type MerchantWebhookWriter interface {
-	WriteDelivery(ctx context.Context, delivery MerchantWebhookDelivery) error
+type TenantWebhookWriter interface {
+	WriteDelivery(ctx context.Context, delivery TenantWebhookDelivery) error
 }
 
-type MerchantWebhookDelivery struct {
+type TenantWebhookDelivery struct {
 	ID            uuid.UUID
-	MerchantID    uuid.UUID
+	TenantID      uuid.UUID
 	TransactionID uuid.UUID
 	EventType     string
 	Payload       []byte
 	EndpointURL   string
+}
+
+type DeadLetterFilter struct {
+	Resolved  *bool
+	EventType *string
+	DateFrom  *time.Time
+	DateTo    *time.Time
+	Limit     int
 }

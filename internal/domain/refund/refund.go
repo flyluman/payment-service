@@ -119,7 +119,7 @@ func New(
 	}
 
 	return &Refund{
-		ID:            uuid.New(),
+		ID:            uuid.Must(uuid.NewV7()),
 		TransactionID: transactionID,
 		Amount:        amount,
 		Reason:        reason,

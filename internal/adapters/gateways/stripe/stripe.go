@@ -5,40 +5,44 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
+type TenantConfig struct {
+	APIKey         string
+	BaseURL        string
+	PublishableKey string
+}
+
 type Config struct {
-	APIKey     string
-	BaseURL    string
-	Timeout    time.Duration
-	HTTPClient *http.Client
+	Timeout       time.Duration
+	HTTPClient    *http.Client
+	ResolveConfig func(ctx context.Context, tenantID uuid.UUID) (*TenantConfig, error)
 }
 
 const maxResponseBytes = 2 << 20
 const defaultHTTPTimeout = 30 * time.Second
 
 type Adapter struct {
-	apiKey  string
-	baseURL string
+	resolve func(ctx context.Context, tenantID uuid.UUID) (*TenantConfig, error)
 	client  *http.Client
+
+	txnTenants sync.Map
 }
 
 func New(cfg Config) *Adapter {
-	base := cfg.BaseURL
-	if base == "" {
-		base = "https://api.stripe.com"
-	}
 	client := cfg.HTTPClient
 	if client == nil {
 		timeout := cfg.Timeout
@@ -48,8 +52,7 @@ func New(cfg Config) *Adapter {
 		client = &http.Client{Timeout: timeout}
 	}
 	return &Adapter{
-		apiKey:  cfg.APIKey,
-		baseURL: strings.TrimRight(base, "/"),
+		resolve: cfg.ResolveConfig,
 		client:  client,
 	}
 }
@@ -60,11 +63,21 @@ func (a *Adapter) Capabilities() ports.GatewayCapabilities {
 		SupportsPartialRefund:   true,
 		IdempotencyCapable:      true,
 		SupportedPaymentMethods: []transaction.PaymentMethod{transaction.PaymentMethodCard},
-		SupportedCurrencies:     []string{"USD", "EUR", "GBP", "INR"},
+		SupportedCurrencies:     []string{"USD", "EUR", "GBP", "BDT"},
 	}
 }
 
 func (a *Adapter) InitiatePayment(ctx context.Context, req ports.GatewayPaymentRequest) (*ports.GatewayPaymentResponse, error) {
+	tc, err := a.resolve(ctx, req.TenantID)
+	if err != nil {
+		return nil, &ports.GatewayError{
+			Category: ports.ErrorCategoryGatewayError, Code: "config_resolve_error",
+			GatewayMessage: err.Error(),
+		}
+	}
+
+	a.txnTenants.Store(req.TransactionID, req.TenantID)
+
 	idem := req.IdempotencyKey
 	if idem == "" {
 		idem = deriveIdempotencyKey(req.TransactionID, req.AttemptNumber)
@@ -84,26 +97,36 @@ func (a *Adapter) InitiatePayment(ctx context.Context, req ports.GatewayPaymentR
 	form.Add("expand[]", "latest_charge.balance_transaction")
 
 	var pi stripePaymentIntent
-	if err := a.do(ctx, http.MethodPost, "/v1/payment_intents", form, idem, &pi); err != nil {
+	if err := a.do(ctx, tc, http.MethodPost, "/v1/payment_intents", form, idem, &pi); err != nil {
 		return nil, err
 	}
-	return toPaymentResponse(&pi), nil
+	return a.toPaymentResponse(ctx, &pi, tc), nil
 }
 
 func (a *Adapter) CheckStatus(ctx context.Context, req ports.GatewayStatusRequest) (*ports.GatewayPaymentResponse, error) {
+	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	if err != nil {
+		return nil, err
+	}
+
 	q := url.Values{}
 	q.Add("expand[]", "latest_charge")
 	q.Add("expand[]", "latest_charge.balance_transaction")
 
 	var pi stripePaymentIntent
 	path := "/v1/payment_intents/" + url.PathEscape(req.GatewayReferenceID) + "?" + q.Encode()
-	if err := a.do(ctx, http.MethodGet, path, nil, "", &pi); err != nil {
+	if err := a.do(ctx, tc, http.MethodGet, path, nil, "", &pi); err != nil {
 		return nil, err
 	}
-	return toPaymentResponse(&pi), nil
+	return a.toPaymentResponse(ctx, &pi, tc), nil
 }
 
 func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*ports.GatewayRefundResponse, error) {
+	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	if err != nil {
+		return nil, err
+	}
+
 	idem := req.IdempotencyKey
 	if idem == "" {
 		idem = deriveIdempotencyKey(req.RefundID, 0)
@@ -119,7 +142,7 @@ func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*
 	}
 
 	var rf stripeRefund
-	if err := a.do(ctx, http.MethodPost, "/v1/refunds", form, idem, &rf); err != nil {
+	if err := a.do(ctx, tc, http.MethodPost, "/v1/refunds", form, idem, &rf); err != nil {
 		return nil, err
 	}
 	return &ports.GatewayRefundResponse{
@@ -131,8 +154,13 @@ func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*
 }
 
 func (a *Adapter) Cancel(ctx context.Context, req ports.GatewayCancelRequest) (*ports.GatewayCancelResponse, error) {
+	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	if err != nil {
+		return nil, err
+	}
+
 	var pi stripePaymentIntent
-	if err := a.do(ctx, http.MethodPost, "/v1/payment_intents/"+url.PathEscape(req.GatewayReferenceID)+"/cancel", url.Values{}, req.IdempotencyKey, &pi); err != nil {
+	if err := a.do(ctx, tc, http.MethodPost, "/v1/payment_intents/"+url.PathEscape(req.GatewayReferenceID)+"/cancel", url.Values{}, req.IdempotencyKey, &pi); err != nil {
 		return nil, err
 	}
 	status := ports.GatewayCancelStatusFailed
@@ -142,17 +170,33 @@ func (a *Adapter) Cancel(ctx context.Context, req ports.GatewayCancelRequest) (*
 	return &ports.GatewayCancelResponse{Status: status}, nil
 }
 
-func (a *Adapter) do(ctx context.Context, method, path string, form url.Values, idemKey string, out any) error {
+func (a *Adapter) resolveForTxn(ctx context.Context, txnID uuid.UUID) (*TenantConfig, error) {
+	v, ok := a.txnTenants.Load(txnID)
+	if !ok {
+		return nil, &ports.GatewayError{
+			Category: ports.ErrorCategoryGatewayError, Code: "tenant_not_cached",
+			GatewayMessage: fmt.Sprintf("tenant for transaction %s not found", txnID),
+		}
+	}
+	return a.resolve(ctx, v.(uuid.UUID))
+}
+
+func (a *Adapter) do(ctx context.Context, tc *TenantConfig, method, path string, form url.Values, idemKey string, out any) error {
+	baseURL := tc.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.stripe.com"
+	}
+
 	var body io.Reader
 	if form != nil {
 		body = strings.NewReader(form.Encode())
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, method, a.baseURL+path, body)
+	httpReq, err := http.NewRequestWithContext(ctx, method, baseURL+path, body)
 	if err != nil {
 		return &ports.GatewayError{Category: ports.ErrorCategoryGatewayError, Code: "request_build_error", GatewayMessage: err.Error(), Underlying: err}
 	}
-	httpReq.SetBasicAuth(a.apiKey, "")
+	httpReq.SetBasicAuth(tc.APIKey, "")
 	if form != nil {
 		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -205,20 +249,41 @@ func deriveIdempotencyKey(id uuid.UUID, attemptNumber int) string {
 	return key
 }
 
-func toPaymentResponse(pi *stripePaymentIntent) *ports.GatewayPaymentResponse {
+func (a *Adapter) toPaymentResponse(ctx context.Context, pi *stripePaymentIntent, tc *TenantConfig) *ports.GatewayPaymentResponse {
+	rawMeta := map[string]any{}
+	for k, v := range pi.Metadata {
+		rawMeta[k] = v
+	}
+	if pi.ClientSecret != "" {
+		rawMeta["client_secret"] = pi.ClientSecret
+	}
+	if tc.PublishableKey != "" {
+		rawMeta["publishable_key"] = tc.PublishableKey
+	}
 	resp := &ports.GatewayPaymentResponse{
 		GatewayReferenceID: pi.ID,
 		Status:             mapPaymentStatus(pi),
 		Amount:             pi.Amount,
 		Currency:           strings.ToUpper(pi.Currency),
-		RawMetadata:        map[string]any{},
-	}
-	for k, v := range pi.Metadata {
-		resp.RawMetadata[k] = v
+		ClientSecret:       pi.ClientSecret,
+		GatewayMetadata: rawMeta,
 	}
 	if pi.LastPaymentError != nil {
 		resp.ErrorCode = firstNonEmpty(pi.LastPaymentError.DeclineCode, pi.LastPaymentError.Code)
 		resp.ErrorMessage = pi.LastPaymentError.Message
+	}
+	if pi.NextAction != nil {
+		na := &ports.NextAction{
+			Type: pi.NextAction.Type,
+		}
+		if pi.NextAction.RedirectToURL != nil {
+			na.RedirectURL = pi.NextAction.RedirectToURL.URL
+		}
+		resp.NextAction = na
+		rawMeta["next_action"] = map[string]any{
+			"type":        na.Type,
+			"redirect_url": na.RedirectURL,
+		}
 	}
 	if c := latestCharge(pi); c != nil {
 		resp.GatewayFees = c.balanceTransactionFee()

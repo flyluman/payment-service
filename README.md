@@ -1,6 +1,6 @@
 # Payment Service
 
-A backend payment processing service supporting multiple gateways (Stripe, Razorpay, PayU), written in Go using a hexagonal (ports-and-adapters) architecture. It handles payment creation and settlement, refunds, cancellations, inbound gateway webhooks, and the reliability infrastructure (outbox, idempotency, circuit breakers, lease recovery) needed to run payments safely at scale.
+A SaaS multitenant payment processing service supporting multiple gateways (Stripe, Razorpay, FIB), written in Go using a hexagonal (ports-and-adapters) architecture. Each tenant independently configures its gateway credentials (stored encrypted), and callers select an explicit gateway per request. The service exposes tenant-scoped gateway management, payment creation, refunds, cancellations, inbound gateway webhooks, and the reliability infrastructure (outbox, idempotency, circuit breakers, lease recovery) needed to run payments safely at scale.
 
 This document describes the architecture, the core domain logic, and the operational processes underneath, with diagrams for each major flow.
 
@@ -13,8 +13,8 @@ This document describes the architecture, the core domain logic, and the operati
 - [3. Project Layout](#3-project-layout)
 - [4. Core Domain: The Transaction Lifecycle](#4-core-domain-the-transaction-lifecycle)
 - [5. Creating and Processing a Payment](#5-creating-and-processing-a-payment)
-- [6. Gateway Routing](#6-gateway-routing)
-- [7. Gateway Fallback and Retry Semantics](#7-gateway-fallback-and-retry-semantics)
+- [6. Gateway Selection](#6-gateway-selection)
+- [7. Gateway Error Handling](#7-gateway-error-handling)
 - [8. Circuit Breaker](#8-circuit-breaker)
 - [9. Idempotency](#9-idempotency)
 - [10. Transactional Outbox and Relay](#10-transactional-outbox-and-relay)
@@ -36,15 +36,17 @@ This document describes the architecture, the core domain logic, and the operati
 
 ## 1. Overview
 
-The service is split into three deployable binaries that share the same domain and adapter code:
+The service runs as a **single process** (`cmd/server`) that spawns all three concerns as goroutines sharing the same database and Valkey connections:
 
-| Binary | Path | Responsibility |
-|---|---|---|
-| **api** | `cmd/api` | HTTP server: create/process payments, refunds, cancellations, receive gateway webhooks, health checks |
-| **relay** | `cmd/relay` | Polls the transactional outbox and publishes domain events downstream |
-| **jobs** | `cmd/jobs` | One-shot scheduled jobs: `partition_manager` (outbox table partitioning) and `lease_expiry` (stuck-transaction recovery + idempotency-key cleanup) |
+| Goroutine | Responsibility |
+|---|---|
+| **API server** | HTTP server: create/process payments, refunds, cancellations, receive gateway webhooks, health checks |
+| **Outbox relay** | Polls the transactional outbox and publishes domain events downstream |
+| **Background jobs** | Runs `partition_manager` and `lease_expiry` on tickers (immediate first run, then periodic) |
 
-Supported payment gateways: **Stripe**, **Razorpay**, **PayU** (`internal/adapters/gateways/*`), each behind a common `ports.GatewayAdapter` interface so the core payment/refund logic is gateway-agnostic.
+A single `SIGINT` / `SIGTERM` propagates through a shared context so all three shut down together.
+
+Supported payment gateways: **Stripe**, **Razorpay**, **FIB** (`internal/adapters/gateways/*`), each behind a common `ports.GatewayAdapter` interface so the core payment/refund logic is gateway-agnostic.
 
 Supported payment methods: card, UPI, netbanking, wallet (varies by gateway capability).
 
@@ -66,17 +68,17 @@ flowchart TB
         GatewayCB[Gateway webhook callbacks]
     end
 
-    subgraph "cmd/api — HTTP server"
+    subgraph "API server goroutine"
         Router[api.Router]
-        MW[Middleware chain:<br/>RequestID → Recover → Auth →<br/>RateLimit → Idempotency]
+        MW[Middleware chain:<br/>RequestID → TraceID → RequestLog → Recover →<br/>Auth → RateLimit → ResponseCache]
         Handlers[Payment / Refund / Cancel /<br/>Webhook / Health handlers]
     end
 
-    subgraph "cmd/relay — Outbox publisher"
+    subgraph "Outbox relay goroutine"
         RelayWorker[relay.Worker<br/>poll → publish → mark]
     end
 
-    subgraph "cmd/jobs — Scheduled jobs"
+    subgraph "Background jobs goroutine"
         PartitionMgr[partition_manager<br/>pre-create / detach / drop]
         LeaseReaper[lease_expiry<br/>reconcile stuck PROCESSING txns]
     end
@@ -92,8 +94,8 @@ flowchart TB
 
     subgraph "Adapters"
         PG[(Postgres:<br/>transactions, refunds,<br/>outbox_events, idempotency_keys,<br/>gateway_config, ...)]
-        Redis[(Redis:<br/>rate limiter, circuit breaker state)]
-        Gateways[Gateway adapters:<br/>Stripe / Razorpay / PayU]
+        Valkey[(Valkey:<br/>rate limiter, circuit breaker state)]
+        Gateways[Gateway adapters:<br/>Stripe / Razorpay / FIB]
     end
 
     Merchant --> Router
@@ -109,8 +111,8 @@ flowchart TB
     WebhookSvc --> PG
 
     PaymentSvc & RefundSvc & CancelSvc & WebhookSvc --> PG
-    PaymentSvc -.circuit breaker.-> Redis
-    MW -.rate limit.-> Redis
+    PaymentSvc -.circuit breaker.-> Valkey
+    MW -.rate limit.-> Valkey
 
     PG -.outbox rows.-> RelayWorker
     RelayWorker --> Gateways
@@ -123,10 +125,10 @@ flowchart TB
 
 The design follows **hexagonal architecture**:
 
-- `internal/domain/` — pure business rules with no I/O: the transaction state machine, refund invariants (over-refund protection), routing scoring, circuit breaker state machine, reconciliation eligibility rules.
+- `internal/domain/` — pure business rules with no I/O: the transaction state machine (`Txn`), refund invariants (over-refund protection), routing scoring, circuit breaker state machine.
 - `internal/app/` — use-case orchestration: takes domain objects and ports (interfaces), coordinates transactions, calls gateways, writes outbox events.
 - `internal/ports/` — interfaces the app layer depends on (`GatewayAdapter`, `Logger`, `MetricRecorder`, `OutboxWriter`, `ConfigStore`, …), so the app layer never imports a concrete adapter.
-- `internal/adapters/` — concrete implementations: Postgres repositories, Redis rate limiter/circuit-breaker store, gateway HTTP clients, TLS manager, envelope encryption, slog-based logger.
+- `internal/adapters/` — concrete implementations: Postgres repositories, Valkey rate limiter/circuit-breaker store, gateway HTTP clients, TLS manager, envelope encryption, slog-based logger.
 - `internal/api/` — HTTP-specific concerns: routing, middleware, request/response DTOs.
 
 ---
@@ -134,49 +136,45 @@ The design follows **hexagonal architecture**:
 ## 3. Project Layout
 
 ```
-cmd/
-  api/            HTTP server entrypoint
-  jobs/            partition_manager & lease_expiry job entrypoint
-  relay/           outbox relay worker entrypoint
-config/            environment-variable driven configuration + validation
+cmd/server/        Single binary entrypoint: API server, relay, and background jobs
+config/            Environment-variable driven configuration + validation (viper)
 internal/
   domain/
-    transaction/   Transaction entity + state machine
+    transaction/   Txn entity + state machine
     refund/        Refund entity + over-refund guard
-    routing/       Gateway scoring/selection algorithm
     gateway/       Circuit breaker state machine, discrepancy metrics
-    reconciliation/ Settlement mismatch types + auto-resolution eligibility
   app/
-    payment/       CreatePayment, ProcessPayment, RecoverExpiredLease
+    payment/       Create, ProcessPayment, ProcessGatewayInitiate, GetGatewayMetadata, RecoverExpiredLease
     refund/        InitiateRefund, ProcessRefund, ResolveCancelRefund
     cancel/        Cancel intent handling
     webhook/       Inbound webhook → transaction resolution
-    routing/       Router orchestration around domain/routing
     idempotency/   Reserve/Lookup/Complete guard used by payment & refund
   adapters/
     postgres/      Repositories, migrations-backed queries, Transactor
-    redis/         Rate limiter (token bucket, Lua), circuit breaker store
-    gateways/      stripe/, razorpay/, payu/ adapters + webhook parsers
+    valkey/        Rate limiter (token bucket, Lua), circuit breaker store
+    gateways/      stripe/, razorpay/, fib/ adapters + webhook parsers
     security/      mTLS certificate manager
     encryption/    Envelope encryption (KMS-style key manager)
-    observability/ slog logger with field redaction, no-op metrics
+    observability/ slog logger with field redaction, OTel metrics
+    sns/           AWS SNS publisher
   api/
-    handlers/      HTTP handlers (payment, refund, cancel, webhook, health)
-    middleware/    Auth, RateLimit, Idempotency, RequestID, Recover
+    handlers/      HTTP handlers (payment, refund, cancel, webhook, health, pay)
+    middleware/    Auth, RateLimit, RequestID, TraceID, RequestLog, Recover
   jobs/
     partition_manager/  Weekly outbox partition lifecycle
     lease_expiry/       Stuck-transaction reaper + idempotency-key sweep
   relay/           Generic outbox polling worker + publisher interface
   ports/           All interfaces + shared types (GatewayAdapter, Logger, ...)
-  testsupport/     Shared Postgres/Redis test harness
-test/integration/  End-to-end tests exercising real Postgres/Redis
+  testsupport/     Shared Postgres/Valkey test harness
+test/integration/  End-to-end tests exercising real Postgres/Valkey
+web/               Embedded static files + checkout templates
 ```
 
 ---
 
 ## 4. Core Domain: The Transaction Lifecycle
 
-Every payment is represented by a `Transaction` with a strictly enforced state machine (`internal/domain/transaction/state_machine.go`). Invalid transitions return `ErrInvalidTransition` rather than silently mutating state, and transitions out of `PROCESSING` clear the processing lease fields.
+Every payment is represented by a `Txn` with a strictly enforced state machine (`internal/domain/transaction/state_machine.go`). Invalid transitions return `ErrInvalidTransition` rather than silently mutating state, and transitions out of `PROCESSING` clear the processing lease fields.
 
 ```mermaid
 stateDiagram-v2
@@ -217,130 +215,131 @@ Notable rules baked into `transaction.go` / `state_machine.go`:
 
 ## 5. Creating and Processing a Payment
 
-`POST /payments` is handled synchronously end-to-end in the current implementation: create, then immediately attempt processing. If processing fails transiently, the client still gets back a `202 Accepted` with the `PENDING`/`PROCESSING` transaction, and the lease-expiry reaper (§13) will pick it up later if it gets stuck.
+The payment flow is a **single-step** synchronous call: `POST /api/v1/payments` creates the transaction, synchronously calls the gateway's `InitiatePayment`, and embeds the gateway-specific output (`gateway_metadata`) in the response. The browser then renders FIB's QR code, Stripe's card form, or Razorpay's checkout button directly from the embedded metadata — no second API call needed.
+
+### Step 1: Create + Initiate (single API call)
+
+`POST /api/v1/payments` (service token, `Idempotency-Key` required) creates a transaction in `PENDING` state, calls the gateway's `InitiatePayment`, transitions to `PROCESSING`, and returns the gateway-specific output in `gateway_metadata`. A `GATEWAY_INITIATE` outbox event is also written as a fallback retry.
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
+    participant C as API Client
     participant H as PaymentHandler
     participant Idem as idempotency.Guard
     participant Svc as payment.Service
-    participant R as Router
-    participant Cfg as ConfigStore
-    participant Repo as TransactionRepo
-    participant Outbox as OutboxWriter
     participant Lease as LeaseStore
     participant GW as GatewayAdapter
+    participant Repo as TransactionRepository
+    participant Outbox as OutboxWriter
 
-    C->>H: POST /payments (Idempotency-Key)
-    H->>Idem: Execute(composite, requestHash)
-    Idem->>Svc: op() — createAndInsert
-    Svc->>R: Route(amount, method, tier...)
-    R->>Cfg: ListActiveGateways / GetFeeModel / GetRoutingWeights
-    Cfg-->>R: candidates + weights
-    R-->>Svc: Decision{SelectedGateway}
-    Svc->>Cfg: GetProcessingTimeout(gateway, method)
+    C->>H: POST /api/v1/payments (Idempotency-Key, X-Service-Token)
+    H->>Svc: Create(input)
+    Svc->>Idem: Execute(composite, requestHash)
+    Idem->>Svc: op() — insert + outbox write
     Svc->>Repo: Insert(txn) [status=PENDING]
-    Svc->>Outbox: Write(PAYMENT_CREATED)
-    Idem-->>H: Verdict=Created, Transaction
-
-    H->>Svc: ProcessPayment(txn.ID)
-    Svc->>Repo: GetByID(txn.ID)
-    Svc->>Lease: Acquire(leaseKey, ttl)
-    Lease-->>Svc: acquired=true
-    Svc->>Repo: UpdateStatus [status=PROCESSING]
-
+    Svc->>Outbox: Write(TRANSACTION_CREATED + GATEWAY_INITIATE)
+    Idem-->>Svc: Verdict=Created
+    Svc->>Svc: syncInitiate()
+    Svc->>Lease: TryAcquireDirect(txnID, ttl)
     Svc->>GW: InitiatePayment(req)
-    GW-->>Svc: GatewayPaymentResponse{SUCCEEDED, ref}
-
-    Svc->>Repo: UpdateStatus [status=SUCCEEDED]
-    Svc->>Outbox: Write(PAYMENT_SUCCEEDED)
-    Svc->>Lease: WriteCachedResponse
-    Svc-->>H: Transaction{SUCCEEDED}
-    H-->>C: 201 Created
+    GW-->>Svc: GatewayPaymentResponse{refID, gateway_metadata}
+    Svc->>Repo: UpdateGatewayReference(refID)
+    Svc->>Repo: UpdateStatus → PROCESSING
+    Svc->>Outbox: Write(raw metadata insert — same tx)
+    Svc-->>H: CreateResult{Txn, gateway_metadata}
+    H-->>C: 201 Created {transaction_id, gateway_metadata, status}
 ```
 
 Key implementation details:
 
-- **`Idempotency-Key` is mandatory** on `POST /payments` and `POST /payments/{id}/refunds`. It's combined with `merchantID + operation` into a composite hash (`idempotency.Composite`), and the request body is hashed (`idempotency.RequestHash`) to detect key reuse with a different payload (→ `409 idempotency_key_reused`).
-- **The processing lease** (`processing_lease` table, `LeaseStore.Acquire`) prevents two concurrent `ProcessPayment` calls (e.g., a client retry racing the reaper) from both calling the gateway. If the lease isn't acquired, the current (possibly still-`PENDING`) transaction is returned untouched.
+- **`Idempotency-Key` is mandatory** on `POST /api/v1/payments` and `POST /api/v1/payments/{id}/refunds`. It's combined with `tenantID + operation` into a composite hash (`idempotency.Composite`), and the request body is hashed (`idempotency.RequestHash`) to detect key reuse with a different payload (→ `409 idempotency_key_reused`).
+- **The processing lease** (`processing_lease` table, `LeaseStore.TryAcquireDirect`) prevents two concurrent `ProcessGatewayInitiate` calls from both calling the gateway. If the lease isn't acquired, the event is skipped (the other instance will handle it).
 - **`EstimatedTimeoutSeconds`** comes from `ConfigStore.GetProcessingTimeout(gateway, method)` and becomes the lease TTL — it must be positive or transaction creation fails.
-- If `ProcessPayment` errors after a successful `CreatePayment` (e.g. gateway adapter unavailable), the handler returns **`202 Accepted`** with the created-but-unprocessed transaction rather than failing the whole request.
+- If `syncInitiate` errors (e.g. gateway adapter unavailable), the handler returns **`500`** with the transaction in `PENDING` state. The caller can retry with the same idempotency key (→ `200 Replayed`), and the outbox relay will eventually process the `GATEWAY_INITIATE` event as a fallback. The `GATEWAY_INITIATE` outbox event handler (`ProcessGatewayInitiate`) is idempotent — if the gateway reference already exists, it's a no-op.
+- `gateway_metadata` contains gateway-specific output (e.g. `client_secret` for Stripe, `qr_code`/`readable_code`/`valid_until` for FIB, `order_id`/`key_id` for Razorpay) and is persisted in the `transaction_gateway_metadata` table for later retrieval.
+- `PublishableKey` is included in `gateway_metadata` for Stripe and Razorpay so the browser can initialize the gateway SDK without a separate config call.
 
----
+### Step 2: Complete payment via checkout page
 
-## 6. Gateway Routing
+The browser opens the checkout page at `GET /pay/{transaction_id}?token={token}`. The page renders gateway-specific UI based on `gateway_metadata`:
 
-`internal/domain/routing` implements a weighted-scoring gateway selection algorithm, orchestrated by `internal/app/routing.Router`.
+- **FIB**: QR code with app links and countdown timer
+- **Stripe**: Card form (Stripe Elements) mounted via Stripe.js — user enters card details, `confirmCardPayment` sends them directly to Stripe
+- **Razorpay**: "Pay with Razorpay" button that opens the Razorpay checkout modal
 
-Filtering (candidates are dropped before scoring, `filterReason`):
-- Inactive gateway
-- Amount outside `[MinAmount, MaxAmount]`
-- Currency not supported
-- Live circuit breaker `OPEN` and still within cooldown
-- 24h discrepancy rate > 20%
+The page subscribes to SSE at `GET /api/v1/payments/{id}/events?token={token}` for real-time status updates. If SSE fails, it falls back to polling `GET /api/v1/payments/{id}?token={token}` every 5 seconds. After 30 seconds without a terminal event, a timeout message is shown with a reload button.
 
-Scoring (each candidate gets a 0–100 sub-score per dimension, combined via configurable `Weights` that must sum to 1.0, ±0.001 tolerance, with at most 2 zero-weighted dimensions):
+### Step 2a: Outbox-initiated retry (fallback)
 
-| Dimension | Signal |
-|---|---|
-| Volume | Relative to the highest 7-day volume among candidates |
-| Cost | Relative to the highest calculated fee among candidates (cheaper = higher score) |
-| Reliability | `1 - discrepancyRate24h`, or the last known score if the breaker is `OPEN` |
-| FX efficiency | Always 100 for domestic currency; otherwise the pre-computed FX ratio |
-| Latency | Based on p99 latency vs. the configured SLA |
+If the synchronous `syncInitiate` fails within `Create`, the `GATEWAY_INITIATE` outbox event written during insertion will be picked up by the outbox relay. The initiator handler calls `ProcessGatewayInitiate` which:
 
-Ties within 1 point (100 in the ×100-scaled integer score) are broken first by **fewer active payment intents**, then **lexicographically by gateway ID** — deterministic and reproducible.
+1. Acquires a processing lease (cross-instance dedup)
+2. Calls the gateway's `InitiatePayment`
+3. Updates `GatewayReferenceID` and transitions to `PROCESSING`
+4. Inserts `gateway_metadata`
 
-The router also checks the **live** circuit-breaker state from Redis (via `BreakerStateReader`), not just the config snapshot, and treats an `OPEN` breaker whose cooldown has elapsed as `HALF_OPEN` (a legal routing target — enabling the probe described in §8), falling back to the config snapshot if Redis is unavailable ("fail open to config").
-
----
-
-## 7. Gateway Fallback and Retry Semantics
-
-This is the part of the payment flow most sensitive to correctness: **not all gateway failures are safe to retry on a different gateway.** `internal/app/payment/process.go`'s `attemptGateways` encodes this explicitly by error category.
+`ProcessGatewayInitiate` is idempotent: if `GatewayReferenceID != ""` or status is not `PENDING`, it returns nil (no-op). This ensures the sync path and the relay path don't conflict — whichever runs first succeeds.
 
 ```mermaid
-flowchart TD
-    Start([Attempt gateway call]) --> Call[callGateway: InitiatePayment]
-    Call --> Result{Result}
+sequenceDiagram
+    participant Relay as Outbox Relay
+    participant Svc as payment.Service
+    participant Lease as LeaseStore
+    participant GW as GatewayAdapter
+    participant Repo as TransactionRepository
 
-    Result -->|Success| Terminal[Terminal: SUCCEEDED]
-    Result -->|GatewayError returned| Classify{Error category}
-
-    Classify -->|HardDecline| FailNoRetry[Terminal: FAILED<br/>never reroute — real decline]
-    Classify -->|SoftDecline| CanFallback{attempt < maxAttempts<br/>AND router can exclude tried?}
-    Classify -->|NetworkTimeout / Ambiguous| StayProcessing[Non-terminal: stays PROCESSING<br/>outcome unknown, no event written]
-    Classify -->|GatewayError e.g. 5xx| FailNoRetry2[Terminal: FAILED<br/>never reroute — might already be charged]
-
-    CanFallback -->|Yes| Reroute[Router.Route excluding tried gateways]
-    Reroute --> NextAdapter[Swap adapter, attempt+1]
-    NextAdapter --> Call
-
-    CanFallback -->|No| FailExhausted[Terminal: FAILED<br/>attributed to last gateway tried]
-
-    Terminal --> RecordBreaker1[recordBreaker: Success]
-    FailNoRetry --> RecordBreaker2[recordBreaker: Success<br/>decline = gateway is healthy]
-    FailNoRetry2 --> RecordBreaker3[recordBreaker: Failure]
-    StayProcessing --> RecordBreaker4[recordBreaker: Failure]
-    FailExhausted --> RecordBreaker5[recordBreaker: per last error]
+    Relay->>Svc: ProcessGatewayInitiate(txnID)
+    Svc->>Repo: Load txn
+    Svc->>Svc: GatewayReferenceID=="" && PENDING?
+    Svc->>Lease: TryAcquireDirect(txnID, ttl)
+    Svc->>GW: InitiatePayment(req)
+    GW-->>Svc: refID + gateway_metadata
+    Svc->>Repo: UpdateGatewayReference(refID)
+    Svc->>Repo: InsertGatewayMetadata
+    Svc->>Repo: UpdateStatus → PROCESSING
 ```
 
-Why each category behaves the way it does:
+---
 
-- **`HardDecline`** (e.g. `card_declined`, `expired_card`): the card/account was genuinely rejected. Retrying on a *different* gateway wouldn't change the outcome and can look like fraud probing, so it's terminal `FAILED` immediately. It also counts as a **breaker success**, because a decline proves the gateway itself is healthy and responsive.
-- **`SoftDecline`** (e.g. `insufficient_funds`, `try_again_later`): plausibly transient or issuer-side, and *not* an indication the gateway already captured funds — safe to retry elsewhere, bounded by `SetMaxGatewayAttempts(n)` (default 1 attempt, i.e. no fallback unless explicitly configured).
-- **`NetworkTimeout` / `Ambiguous`**: the request may or may not have reached the gateway, or a response may have been lost in transit. The transaction is deliberately left **non-terminal** (`PROCESSING`) rather than guessed at — no outbox event is written, and it's the lease-expiry reaper's job (§13) to later call `CheckStatus` and resolve it definitively.
-- **`GatewayError`** (5xx / unexpected gateway failures): treated the same as ambiguous for *fallback* purposes — it is **never** retried on a different gateway, because the first gateway might have accepted and processed the charge despite returning an error. It does finalize as `FAILED` here specifically for the synchronous attempt path (distinct from the reaper's more conservative "leave it alone" handling of the same category during recovery).
-- **Circuit breaker recording**: `NetworkTimeout`, `GatewayError`, and `Ambiguous` all count as **breaker failures** (they indicate gateway-side health problems); `HardDecline` and `SoftDecline` do not.
+## 6. Gateway Selection
 
-The fallback loop tracks every gateway ID already tried (`tried []string`) and passes it to the router as `ExcludeGateways`, so a second attempt can never retry the same gateway that just failed.
+The payment path uses the **explicit `gateway_id`** from the caller's request.
+
+Each tenant configures which gateways they have credentials for via the tenant gateway config API (`/api/v1/tenants/{tenant_id}/gateways`). The caller discovers available gateways via `GET /api/v1/gateways` (optionally filtered by `?payment_method=`) and passes the chosen `gateway_id` in the payment request.
+
+`GET /api/v1/gateways` returns:
+```json
+[
+  {
+    "gateway_id": "stripe",
+    "display_name": "Stripe",
+    "is_active": true,
+    "supported_methods": ["card"],
+    "supported_currencies": ["USD", "BDT"]
+  }
+]
+```
+
+Gateways whose circuit breaker is **OPEN** are excluded from this listing. If the Valkey breaker store is unreachable the gateway is included (fail-open — safe degradation).
+
+---
+
+## 7. Gateway Error Handling
+
+A single gateway call is made per payment attempt. The error category determines the outcome:
+
+- **`HardDecline`** (e.g. `card_declined`, `expired_card`): the card/account was genuinely rejected. Terminal `FAILED` immediately. Counts as a circuit breaker success (the gateway is healthy).
+- **`SoftDecline`** (e.g. `insufficient_funds`, `try_again_later`): plausibly transient. Terminal `FAILED` for the synchronous attempt; the caller may retry with a new idempotency key.
+- **`NetworkTimeout` / `Ambiguous`**: the request may or may not have reached the gateway. The transaction is left **non-terminal** (`PROCESSING`) — the lease-expiry reaper (§13) later calls `CheckStatus` to resolve it definitively.
+- **`GatewayError`** (5xx / unexpected): finalised as `FAILED` for the synchronous attempt, but counts as a circuit breaker failure.
+
+Circuit breaker recording: `NetworkTimeout`, `GatewayError`, and `Ambiguous` count as failures; `HardDecline` and `SoftDecline` do not.
 
 ---
 
 ## 8. Circuit Breaker
 
-`internal/domain/gateway` defines the state machine; `internal/adapters/redis.CircuitBreakerStore` persists it atomically via Lua scripts (`RecordFailure`, `RecordSuccess`, `Transition`) so concurrent API instances agree on state without races.
+`internal/domain/gateway` defines the state machine; `internal/adapters/valkey.CircuitBreakerStore` persists it atomically via Lua scripts (`RecordFailure`, `RecordSuccess`, `Transition`) so concurrent API instances agree on state without races.
 
 ```mermaid
 stateDiagram-v2
@@ -360,14 +359,15 @@ stateDiagram-v2
     note right of CLOSED
         Routing still checks live breaker
         state even if config snapshot
-        says CLOSED (fail-open on Redis error)
+        says CLOSED (fail-open on Valkey error)
     end note
 ```
 
 - **Cooldown escalation**: `CooldownDuration(n)` doubles per consecutive failure (60s, 120s, 240s), capped at 240s, so a gateway that keeps failing right after being re-enabled gets progressively longer timeouts instead of hammering it every 60 seconds.
-- **Single-flighted probing**: `AcquireProbe` uses a Redis `SETNX` so that when a breaker's cooldown has elapsed, only one in-flight request is allowed to "probe" the gateway (routed as if `HALF_OPEN`) while others still treat it as unavailable — avoiding a thundering herd hitting a gateway the moment its cooldown lapses.
-- **Fail-open on Redis outage**: if the breaker store itself is unreachable, `Router.liveBreakerState` falls back to the last-known state from the config snapshot rather than blocking all routing decisions on Redis being up.
+- **Single-flighted probing**: `AcquireProbe` uses a Valkey `SETNX` so that when a breaker's cooldown has elapsed, only one in-flight request is allowed to "probe" the gateway (routed as if `HALF_OPEN`) while others still treat it as unavailable — avoiding a thundering herd hitting a gateway the moment its cooldown lapses.
+- **Fail-open on Valkey outage**: if the breaker store itself is unreachable, `Router.liveBreakerState` falls back to the last-known state from the config snapshot rather than blocking all routing decisions on Valkey being up.
 - Only `CLOSED → OPEN`, `OPEN → HALF_OPEN`, and `HALF_OPEN → {CLOSED, OPEN}` are legal; anything else (e.g. `CLOSED → HALF_OPEN` directly) is rejected by the transition script.
+- **Gateway discovery respects circuit breaker state**: `GET /api/v1/gateways` filters out gateways whose Valkey circuit breaker state is non-routable (OPEN). This prevents callers from selecting an unhealthy gateway at checkout time. On Valkey error the gateway is included (fail-open).
 
 ---
 
@@ -375,8 +375,8 @@ stateDiagram-v2
 
 Idempotency is enforced at **two layers**, both following the same Reserve → run-or-lookup → Complete shape:
 
-1. **HTTP layer** (`middleware.Idempotency`): caches the *entire HTTP response* (status + body) keyed by `merchant + method + path + Idempotency-Key`, scoped per merchant so two different merchants can safely reuse the same key string.
-2. **Business layer** (`app/idempotency.Guard`): used inside `payment.Service.CreatePayment` and `refund.Service.InitiateRefund` to guard the underlying domain operation itself (insert + outbox write), independent of how it's invoked.
+1. **HTTP layer** (`middleware.Idempotency`): caches the *entire HTTP response* (status + body) keyed by `tenant + method + path + Idempotency-Key`, scoped per tenant so two different tenants can safely reuse the same key string.
+2. **Business layer** (`app/idempotency.Guard`): used inside `payment.Service.Create` and `refund.Service.InitiateRefund` to guard the underlying domain operation itself (insert + outbox write), independent of how it's invoked.
 
 ```mermaid
 flowchart TD
@@ -389,6 +389,7 @@ flowchart TD
     OpResult -->|Error| Rollback[Rollback tx<br/>reservation undone — key free for retry]
     OpResult -->|OK| Complete[store.Complete composite, response]
     Complete --> Commit1[Commit] --> Created([Verdict: Created])
+
     Rollback --> ErrOut([Return error])
 
     Claimed -->|No| LookupStore[store.Lookup composite]
@@ -479,13 +480,13 @@ flowchart TD
     Record --> Dup{Already recorded?}
     Dup -->|Yes| DupOut[Outcome: Duplicate<br/>no-op, commit]
     Dup -->|No| Lookup[GetByGatewayReference]
-    Lookup --> Found{Transaction found?}
+    Lookup --> Found{Txn found?}
     Found -->|No| UnkOut[Outcome: UnknownTxn]
-    Found -->|Yes| Raw[InsertRawMetadata]
+    Found -->|Yes| Raw[InsertGatewayMetadata]
     Raw --> Terminal{Status maps to<br/>terminal AND txn is PROCESSING?}
     Terminal -->|No| NoopOut[No transition,<br/>return current status]
     Terminal -->|Yes| Transition[TransitionState → SUCCEEDED/FAILED]
-    Transition --> WriteEvent[Outbox.Write<br/>PAYMENT_SUCCEEDED/FAILED]
+    Transition --> WriteEvent[Outbox.Write<br/>TRANSACTION_SUCCEEDED/FAILED]
     WriteEvent --> Commit[Commit tx]
     Commit --> ResolvedOut[Outcome: Resolved]
 
@@ -497,7 +498,7 @@ flowchart TD
 
 Security and correctness details:
 
-- **Per-gateway signature verification** is delegated to each adapter's `ParseWebhook` (`GatewayWebhookParser`): Stripe verifies an HMAC-SHA256 over `timestamp.body` and rejects payloads outside a 300-second tolerance window; Razorpay verifies an HMAC-SHA256 header signature; PayU verifies its SHA-512 "reverse hash" over form fields (including the optional `additionalCharges` field, which changes the digest if present).
+- **Per-gateway signature verification** is delegated to each adapter's `ParseWebhook` (`GatewayWebhookParser`): Stripe verifies an HMAC-SHA256 over `timestamp.body` and rejects payloads outside a 300-second tolerance window; Razorpay verifies an HMAC-SHA256 header signature; FIB parses the raw JSON payload (`{id, paymentId, status}`) without signature verification (webhook secret is per-tenant from encrypted DB config).
 - **Duplicate delivery is a no-op, not an error**: gateways commonly redeliver webhooks; `RecordEvent` uses a unique constraint on `(event_id, gateway_id)` so a redelivery is detected and short-circuited before any transaction mutation, still returning `200 OK`.
 - **Only `PROCESSING` transactions are mutated**, and only for a status that maps to a terminal outcome (`succeeded/success/captured/paid` → `SUCCEEDED`; `failed/failure` → `FAILED`). A webhook arriving for an already-terminal or non-`PROCESSING` transaction is accepted but causes no transition — this prevents a stale or out-of-order webhook from clobbering a status that a different code path (e.g. the reaper) already resolved.
 - **Timestamp/replay-window check** (`checkTimestamp`) is optional per gateway (`ConfigStore.WebhookPolicy`) and only enforced if the gateway sends an `X-Webhook-Timestamp` header.
@@ -514,20 +515,20 @@ Refund gateway outcomes follow the same "don't guess on ambiguity" principle as 
 
 ### Cancel-intent race with a still-succeeding payment
 
-The most interesting correctness case in the service: a merchant/ops cancel request can land *while a payment is still in flight at the gateway*. If the gateway ends up honoring the payment anyway, the service must notice and auto-refund exactly once.
+The most interesting correctness case in the service: a tenant/ops cancel request can land *while a payment is still in flight at the gateway*. If the gateway ends up honoring the payment anyway, the service must notice and auto-refund exactly once.
 
 ```mermaid
 sequenceDiagram
-    participant Ops as Merchant/Ops
+    participant Ops as Tenant/Ops
     participant CancelH as CancelHandler
-    participant Repo as TransactionRepo
+    participant Repo as TransactionRepository
     participant PaySvc as payment.Service
     participant GW as GatewayAdapter
     participant RefundSvc as refund.Service (CancelResolver)
 
     Note over PaySvc,GW: Payment already PROCESSING at the gateway
 
-    Ops->>CancelH: POST /payments/:id/cancel
+    Ops->>CancelH: POST /api/v1/payments/{id}/cancel
     CancelH->>Repo: SetCancelIntent(id, actor, via)
     Repo-->>CancelH: ok=true (first writer wins)
 
@@ -564,7 +565,7 @@ Why this is safe under concurrency:
 
 ## 13. Lease-Expiry Reaper
 
-A payment that got stuck `PROCESSING` — because the synchronous attempt hit a `NetworkTimeout`/`Ambiguous`/`GatewayError` and correctly declined to guess — needs something to eventually resolve it. That's the `lease_expiry` job (`cmd/jobs JOB=lease_expiry`), intended to run on a schedule (e.g. every minute).
+A payment that got stuck `PROCESSING` — because the synchronous attempt hit a `NetworkTimeout`/`Ambiguous`/`GatewayError` and correctly declined to guess — needs something to eventually resolve it. That's the `lease_expiry` job, wired as a periodic goroutine inside the single process (runs immediately at startup, then on a configurable interval).
 
 ```mermaid
 flowchart TD
@@ -578,8 +579,8 @@ flowchart TD
     LoadTxn --> CheckStatus[adapter.CheckStatus at gateway]
     CheckStatus --> Outcome{Gateway status}
 
-    Outcome -->|SUCCEEDED| FinalizeOK[finalize → SUCCEEDED<br/>+ PAYMENT_SUCCEEDED event]
-    Outcome -->|FAILED| FinalizeFail[finalize → FAILED<br/>+ PAYMENT_FAILED event]
+    Outcome -->|SUCCEEDED| FinalizeOK[finalize → SUCCEEDED<br/>+ TRANSACTION_SUCCEEDED event]
+    Outcome -->|FAILED| FinalizeFail[finalize → FAILED<br/>+ TRANSACTION_FAILED event]
     Outcome -->|Still PROCESSING / network error| LeaveAlone[No write — stays PROCESSING<br/>for the next sweep]
 
     FinalizeOK --> NextTxn[Continue loop]
@@ -599,7 +600,7 @@ flowchart TD
 
 ## 14. Partition Management
 
-`outbox_events` is partitioned **weekly** (`outbox_YYYY_Wnn`, ISO week numbering) to keep the hot table small and make old data cheap to age out. The `partition_manager` job (`cmd/jobs JOB=partition_manager`) maintains this on a schedule.
+`outbox_events` is partitioned **weekly** (`outbox_YYYY_Wnn`, ISO week numbering) to keep the hot table small and make old data cheap to age out. The `partition_manager` job (running as a periodic goroutine inside the single process) maintains this on a schedule.
 
 Responsibilities, all guarded by a single Postgres advisory lock (`AcquireLock`/`ReleaseLock`) so only one instance does this work at a time even if the job is scheduled redundantly:
 
@@ -611,22 +612,50 @@ Responsibilities, all guarded by a single Postgres advisory lock (`AcquireLock`/
 
 ## 15. Rate Limiting
 
-`internal/adapters/redis.RateLimiter` implements a **token-bucket** algorithm executed atomically in Redis via a Lua script (`scripts/token_bucket.lua`), keyed on three independent dimensions simultaneously — user, merchant, and IP — so exhausting one dimension's bucket doesn't consume tokens from the others.
+`internal/adapters/valkey.RateLimiter` implements a **token-bucket** algorithm executed atomically in Valkey via a Lua script (`scripts/token_bucket.lua`), keyed on three independent dimensions simultaneously — user, tenant, and IP — so exhausting one dimension's bucket doesn't consume tokens from the others.
 
-- **Local in-memory fallback**: if Redis is unavailable for `failureThreshold` (3) consecutive calls, the limiter flips to a local, per-process token bucket sized at `capacity × FallbackMultiplier` (default 0.5 — deliberately more conservative than the Redis-backed limit), backed by an LRU (`container/list`) capped at `LocalMaxBuckets` to bound memory. A background health check restores the Redis-backed path once it recovers.
-- **Merchant bucket key comes from the authenticated principal**, never a client-supplied header — `merchantBucketID` reads from request context (set by the auth middleware), so a spoofed `X-Merchant-ID` header can't be used to attribute load to (or rate-limit) a different merchant.
+- **Local in-memory fallback**: if Valkey is unavailable for `failureThreshold` (3) consecutive calls, the limiter flips to a local, per-process token bucket sized at `capacity × FallbackMultiplier` (default 0.5 — deliberately more conservative than the Valkey-backed limit), backed by an LRU (`container/list`) capped at `LocalMaxBuckets` to bound memory. A background health check restores the Valkey-backed path once it recovers.
+- **Merchant bucket key comes from the authenticated principal**, never a client-supplied header — `tenantBucketID` reads from request context (set by the auth middleware), so a spoofed `X-Tenant-ID` header can't be used to attribute load to (or rate-limit) a different tenant.
 - Rejections return `429` with a computed `Retry-After` header (minimum 1 second).
 
 ---
 
 ## 16. Authentication and Authorization
 
-`middleware.Authenticate` supports two static, pre-shared-token principal types configured via environment variables:
+The service uses two independent auth layers depending on caller type.
 
-- **Service tokens** (`X-Service-Token`) map to a specific `MerchantID` — the merchant identity is *bound to the token*, not read from any request header, which is what makes the rate-limiter merchant-key spoofing protection in §15 possible.
-- **Ops tokens** (`X-Ops-Token`) grant the `ops` role without a merchant binding (used for cancel/refund operational actions).
+### API callers (service tokens)
 
-Tokens are stored hashed (SHA-256) in memory; `/health` and `/webhooks/*` are exempt from authentication (webhooks authenticate via gateway signature instead, §11). If no tokens are configured at all, auth middleware is skipped entirely and a warning is logged — appropriate for local development, not for production.
+Configured via environment variables:
+
+- **Service tokens** (`X-Service-Token`) map to a specific `TenantID` and `UserID` — the tenant identity is *bound to the token*, not read from any request header, which is what makes the rate-limiter tenant-key spoofing protection in §15 possible.
+- **Ops tokens** (`X-Ops-Token`) grant the `ops` role without a tenant binding (used for cancel/refund operational actions).
+
+Tokens are stored hashed (SHA-256) in memory.
+
+### Browser callers (checkout token)
+
+Browser-facing paths are exempt from service-token auth. Instead, a per-transaction **checkout token** is generated at payment creation time (`POST /api/v1/payments`) and returned in the `token` response field. The browser presents this token on every subsequent call via the `pay/` paths:
+
+| Path | Token location |
+|---|---|
+| `GET /pay/{transaction_id}` | `?token=` query param |
+| `GET /api/v1/payments/{id}` | `?token=` query param |
+| `GET /api/v1/payments/{id}/events` | `?token=` query param |
+
+The token is a 32-byte cryptographically random value (SHA-256 hashed on the transaction row). It is valid for the lifetime of the `PENDING` transaction and requires no service token.
+
+### Exempt path summary
+
+| Path | Auth |
+|---|---|
+| `GET /health` | None |
+| `POST /webhooks/*` | Gateway signature |
+| `GET /pay/*` | Checkout token |
+| `POST /api/v1/payments` (service token) | **Service token required** |
+| `GET /api/v1/payments/{id}` | Service token **or** checkout token |
+| `GET /api/v1/payments/{id}/events` | Service token **or** checkout token |
+| All other `/api/v1/*` | Service / ops token required |
 
 ---
 
@@ -653,9 +682,9 @@ Tokens are stored hashed (SHA-256) in memory; `/health` and `/webhooks/*` are ex
 
 ## 19. Observability
 
-- **Structured logging** (`internal/adapters/observability.SlogLogger`) wraps `log/slog` with a custom `TRACE` level below `DEBUG`, and **automatically redacts** known-sensitive field keys (`vpa`, `card_number`, `pan`, `cvv`, `card_cvv` — case-insensitive) to `[REDACTED]` before they're ever written to output.
+- **Structured logging** (`internal/adapters/observability.SlogLogger`) wraps `log/slog` with a custom `TRACE` level below `DEBUG`, and **automatically redacts** known-sensitive field keys (`vpa`, `card_number`, `pan`, `cvv`, `card_cvv`, `token`, `api_key`, `client_secret`, `secret`, `password`, `authorization`, `access_token`, `refresh_token`, `private_key` — case-insensitive) to `<redacted>` before they're ever written to output.
 - **Error-log contract enforcement**: `Logger.Error` checks for required fields (`error_code`, `trace_id`, `transaction_id`) on every call and appends a `log_validation_error` note if any are missing — a lightweight guardrail against error logs that are hard to correlate later, without failing the call itself.
-- **Metrics**: a `MetricRecorder` port is defined with counters/histograms/gauges for transaction outcomes, gateway fallback/circuit-breaker events, outbox publish latency/failures, rate-limiter fallback activity, and reconciliation mismatch rates (see `internal/ports/metrics.go` for the full catalog); the shipped implementation (`NewNoopMetrics`) is a no-op, ready to be swapped for a real backend (StatsD/Prometheus/etc.).
+- **Metrics**: a `MetricRecorder` port is defined with counters/histograms/gauges for transaction outcomes, gateway fallback/circuit-breaker events, outbox publish latency/failures, and rate-limiter fallback activity (see `internal/ports/metrics.go` for the full catalog); the shipped implementation (`NewNoopMetrics`) is a no-op, ready to be swapped for a real backend (StatsD/Prometheus/etc.).
 
 ---
 
@@ -663,66 +692,187 @@ Tokens are stored hashed (SHA-256) in memory; `/health` and `/webhooks/*` are ex
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/health` | none | DB connectivity check |
-| `POST` | `/payments` | service/ops token | Create + immediately attempt a payment. Requires `Idempotency-Key`. |
-| `GET` | `/payments/{id}` | service/ops token | Fetch a transaction by ID |
-| `POST` | `/payments/{id}/refunds` | service/ops token | Initiate + immediately attempt a refund. Requires `Idempotency-Key`. |
-| `POST` | `/payments/{id}/cancel` | service/ops token | Request cancellation (idempotent; safe on already-terminal transactions) |
-| `POST` | `/webhooks/gateway/{gateway_id}` | gateway signature | Inbound gateway status callback |
+| `GET` | `/health` | none | DB + Valkey connectivity check |
+| `GET` | `/pay/{transaction_id}` | checkout token (`?token=`) | Checkout page (FIB QR, Stripe card form, Razorpay button based on `gateway_metadata`) |
+| `GET` | `/pay/success` | checkout token (`?token=`) | Payment success landing page |
+| `GET` | `/pay/failure` | checkout token (`?token=`) | Payment failure landing page |
+| `GET` | `/api/v1/gateways` | service/ops token | List available gateways (optional `?payment_method=` filter) |
+| `POST` | `/api/v1/payments` | service token | Create transaction + initiate gateway payment (single step). Requires `Idempotency-Key`. Returns `transaction_id`, `gateway_metadata`, `status`, `token`. On sync initiate failure => 500 (retry with same idempotency key). |
+| `GET` | `/api/v1/payments/{id}` | service/ops or checkout token (`?token=`) | Fetch a transaction by ID |
+| `POST` | `/api/v1/payments/{id}/refunds` | service/ops token | Initiate + immediately attempt a refund. Requires `Idempotency-Key`. |
+| `POST` | `/api/v1/payments/{id}/cancel` | service/ops token | Request cancellation (idempotent; safe on already-terminal transactions) |
+| `GET` | `/api/v1/payments/{id}/events` | service/ops or checkout token (`?token=`) | SSE stream of transaction status changes |
+| `GET` | `/api/v1/tenants/{tenant_id}/gateways` | service/ops token | List a tenant's gateway configurations |
+| `GET` | `/api/v1/tenants/{tenant_id}/gateways/{gateway_id}` | service/ops token | Get a single tenant gateway config |
+| `POST` | `/api/v1/tenants/{tenant_id}/gateways` | service/ops token | Create or update a tenant gateway config |
+| `DELETE` | `/api/v1/tenants/{tenant_id}/gateways/{gateway_id}` | service/ops token | Delete a tenant gateway config |
+| `POST` | `/webhooks/gateway/{gateway_id}` | gateway signature | Inbound gateway status callback (uses `?transaction_id=` query param for tenant resolution) |
 
-Common error shape: `{"error": {"code": "...", "message": "..."}}`. Notable status codes beyond the obvious 200/201/400/404:
+### Request/Response Examples
 
-- `202 Accepted` — created/initiated, but the synchronous processing attempt failed (client should poll `GET /payments/{id}`)
+**Create Payment:**
+```http
+POST /api/v1/payments
+X-Service-Token: test-token
+Idempotency-Key: payment-unique-key
+Content-Type: application/json
+
+{
+  "gateway_id": "stripe",
+  "amount": 50000,
+  "currency": "BDT",
+  "payment_method": "card",
+  "customer_id": "33333333-3333-3333-3333-333333333333",
+  "customer_email": "buyer@example.com",
+  "description": "Order #1234",
+  "metadata": { "order_id": "ORD-1234" },
+  "callback_url": "https://example.com/callback",
+  "redirect_url": "https://example.com/redirect"
+}
+```
+
+**Response (Stripe):**
+```json
+{
+  "success": true,
+  "data": {
+    "transaction_id": "txn-uuid",
+    "status": "PROCESSING",
+    "token": "checkout-token",
+    "gateway_metadata": {
+      "client_secret": "pi_xxx_secret_yyy",
+      "publishable_key": "pk_test_xxx"
+    }
+  },
+  "request_id": "req-uuid",
+  "timestamp": "2026-01-01T00:00:00.000000000Z"
+}
+```
+
+**Response (FIB):**
+```json
+{
+  "success": true,
+  "data": {
+    "transaction_id": "txn-uuid",
+    "status": "PROCESSING",
+    "token": "checkout-token",
+    "gateway_metadata": {
+      "qr_code": "data:image/png;base64,...",
+      "readable_code": "FIB-ABC123",
+      "personal_app_link": "https://fib.app/pay/...",
+      "business_app_link": "https://fib.app/business/...",
+      "corporate_app_link": "https://fib.app/corporate/...",
+      "valid_until": "2026-01-01T00:05:00Z"
+    }
+  },
+  "request_id": "req-uuid",
+  "timestamp": "2026-01-01T00:00:00.000000000Z"
+}
+```
+
+Common error shape: `{"success": false, "error": {"code": "...", "message": "..."}}`. Notable status codes beyond the obvious 200/201/400/404:
+
+- `202 Accepted` — refund initiated, but the synchronous processing attempt failed (client should poll `GET /api/v1/payments/{id}`)
 - `409` — `idempotency_in_progress` or `idempotency_key_reused`
-- `422` — `no_eligible_gateway`, `not_refundable`, or `over_refund`
+- `422` — `no_eligible_gateway`, `not_refundable`, `over_refund`, `initiate_failed`
 - `429` — rate limited (`Retry-After` header set)
+- `500` — sync initiate failed on a new transaction (retry with same idempotency key)
 
 ---
 
 ## 21. Configuration
 
-All configuration is via environment variables, loaded and validated in `config/config.go` (`LoadConfig` fails fast with an aggregated list of every missing/invalid value). Highlights by area:
+All configuration comes from `config.yaml` with environment variable overrides, loaded and validated in `config/config.go` (`LoadConfig` fails fast with an aggregated list of every missing/invalid value). A `.env` file in the working directory is auto-loaded if present (`godotenv.Load`, see `config/config.go:145`). Highlights by area:
 
 | Area | Key variables | Notes |
-|---|---|---|
+|---|---|---|---|
 | App | `ENVIRONMENT` (prod/staging/dev), `PORT`, `MTLS_STRICT_MODE` | |
-| Database | `DATABASE_PRIMARY_HOST`, `DATABASE_REPLICA_HOST`, `DATABASE_NAME/USER/PASSWORD`, `DATABASE_SSL_MODE` | Pool sizing via `DATABASE_MAX_OPEN_CONNS` etc. |
-| Redis | `REDIS_ADDRS` (comma-separated), separate DBs for rate-limit vs. cache | |
-| Outbox | `OUTBOX_RELAY_MODE` (`cdc`\|`polling`), `OUTBOX_RELAY_BATCH_SIZE`, `OUTBOX_RELAY_MAX_ATTEMPTS`, WAL-lag alert thresholds | Shard count fixed at 64 by schema |
-| Rate limit | `RATE_LIMIT_FALLBACK_MULTIPLIER` (0,1], `RATE_LIMIT_LOCAL_MAX_BUCKETS` | |
-| Routing | `ROUTING_SNAPSHOT_TTL_SECONDS`, `GATEWAY_FEE_CACHE_TTL_SEC`, `FX_RECONCILIATION_TOLERANCE_PCT` | |
-| Security | `TLS_CERT_FILE/KEY_FILE/CA_FILE`, `TLS_CERT_REFRESH_INTERVAL_SECONDS`, `DEK_CACHE_TTL_SECONDS` | TLS optional; omit to run plain HTTP |
-| Jobs | `LEASE_EXPIRY_INTERVAL_SECONDS`, `JOB_LOCK_TIMEOUT_MINUTES` | |
-| Gateways | `STRIPE_API_KEY`, `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`, `PAYU_MERCHANT_KEY`/`PAYU_MERCHANT_SALT`, plus `*_BASE_URL` overrides for testing | |
-| Auth | `SERVICE_TOKENS` (`token=merchantID,...`), `OPS_TOKENS` (comma-separated) | Omit entirely to disable auth (dev only) |
+| Database | `DATABASE_PRIMARY_HOST`, `DATABASE_NAME/USER/PASSWORD`, `DATABASE_SSL_MODE` | Pool sizing via `DATABASE_MAX_OPEN_CONNS` etc. |
+| Valkey | `VALKEY_ADDRS` (comma-separated), separate DBs for rate-limit vs. cache | |
+| Outbox | `OUTBOX_RELAY_BATCH_SIZE`, `OUTBOX_RELAY_MAX_ATTEMPTS`, WAL-lag alert thresholds | Shard count fixed at 64 by schema |
+| Rate limit | `RATE_LIMIT_FALLBACK_MULTIPLIER` (0,1], `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_SEC` | |
+| Security | `ENCRYPTION_KEY`, `TLS_CERT_FILE/KEY_FILE/CA_FILE`, `TLS_CERT_REFRESH_INTERVAL_SECONDS`, `SERVICE_TOKENS`, `OPS_TOKENS` | `ENCRYPTION_KEY` is a hex-encoded 256-bit key for field-level encryption of gateway credentials in `tenant_gateway_configs`; without it, credentials stored as plaintext. TLS optional; omit to run plain HTTP. Webhook secrets are per-tenant from `tenant_gateway_configs` table |
+| Jobs | `LEASE_EXPIRY_INTERVAL_SECONDS`, `LEASE_REAPER_IDEMPOTENCY_TIMEOUT_SEC`, `PARTITION_*` | |
+| Gateways | `CIRCUIT_BREAKER_FAILURE_THRESHOLD`, `GATEWAY_HTTP_TIMEOUT` | All gateway credentials (API keys, secrets, base URLs, publishable keys, webhook secrets) are per-tenant from `tenant_gateway_configs` table (encrypted at rest). No global env vars for secrets. |
+| Auth | `SERVICE_TOKENS` (`token=tenantID:userID,...`), `OPS_TOKENS` (comma-separated) | Must be configured — server will not start without at least one token. Browser checkout paths use per-transaction checkout tokens instead. |
 
-`Validate(c)` additionally enforces cross-field invariants, e.g. `OUTBOX_RELAY_WAL_LAG_ALERT_THRESHOLD_MB < OUTBOX_RELAY_WAL_LAG_CRITICAL_THRESHOLD_MB`.
+`Validate(c)` additionally enforces cross-field invariants, e.g. `outbox.wal_lag_alert_threshold_mb < outbox.wal_lag_critical_threshold_mb`.
 
 ---
 
 ## 22. Running Locally
 
 ```bash
-# Start Postgres + Redis for local/integration use
-docker compose -f deploy/docker/docker-compose.test.yml up -d
+# Start Postgres + Valkey for local/integration use
+docker compose up -d postgres valkey
 
-# Run the API server (see §21 for required env vars)
-go run ./cmd/api
+# Run the service — starts API, relay, and background jobs in one process
+# (see §21 for required env vars; .env file in working dir is auto-loaded)
+#
+# Production-like dev: set SERVICE_TOKENS so API calls require auth.
+# Optionally set ENCRYPTION_KEY (hex-encoded 256-bit) to encrypt
+# gateway credentials at rest in tenant_gateway_configs.
+# Browser checkout paths are exempt from service-token auth
+# (they use per-transaction checkout tokens instead).
+SERVICE_TOKENS=test-token=11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222 \
+  go run ./cmd/server
 
-# Run the outbox relay
-go run ./cmd/relay
-
-# Run a one-shot job
-JOB=partition_manager go run ./cmd/jobs
-JOB=lease_expiry go run ./cmd/jobs
+# Or run the full stack via Docker Compose (builds the binary, starts infra)
+docker compose up --build
 ```
+
+### Seed Data
+
+After starting the stack, load the seed data to get FIB gateway config and sample tenant records:
+
+```bash
+psql -h localhost -U payment -d payment_dev -f seed/seed.sql
+```
+
+This creates:
+- FIB gateway catalog entry with timeouts, fee models, and metadata schemas
+- Sample tenant with pre-configured FIB gateway credentials (no encryption for local dev)
+- Example completed transaction with gateway_metadata (QR code, app links)
+- Default notification templates
+
+### Service Token for Local Dev
+
+To make API calls from Postman/curl, set the env var:
+```bash
+SERVICE_TOKENS=test-token=11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222
+```
+
+Then use `X-Service-Token: test-token` on all API requests (payment create, gateway CRUD, refunds, cancellations). Browser checkout (`/pay/` paths) require no service token — they use the per-transaction checkout token instead.
+
+### Management UI
+
+Open `http://localhost:8080/` in a browser to access the gateway management dashboard.
+Enter a tenant UUID to view, add, edit, or delete their gateway configurations.
+
+### Postman Collection
+
+Import `postman/collection.json` into Postman (use `postman/environment.json` for dev variables). Covers all 22 endpoints:
+- Health check and FIB gateway discovery
+- Tenant gateway CRUD (FIB config upsert with `client_id`/`client_secret`/`base_url`)
+- Single-step payment creation (FIB IQD) — auto-saves `transaction_id` and `token`
+- Refunds and cancellations
+- Webhook simulation (FIB)
+- Checkout page access (`GET /pay/{transaction_id}?token=`)
+- SSE event stream for real-time status
+- Dispute and dead letter management
+
+### Integration Docs
+
+- `docs/booking-engine-integration.md` — server-to-server: create payments, handle webhooks, refund/cancel
+- `docs/frontend-integration.md` — browser: checkout flow, SSE events, custom UI, security
 
 ---
 
 ## 23. Testing
 
 - **Unit tests** live alongside the code they test (`*_test.go`) and use hand-written fakes for every port (`fakeRepo`, `fakeOutbox`, `fakeRegistry`, …) — no mocking framework, no real I/O.
-- **Integration tests** (`test/integration/`, and `*_integration_test.go` under `adapters/postgres` and `adapters/redis`) are gated behind the `integration` build tag and require the Postgres/Redis containers above; they exercise real concurrency (goroutine races against actual row locks, actual Redis Lua scripts) for things a fake can't prove, e.g.:
+- **Integration tests** (`test/integration/`, and `*_integration_test.go` under `adapters/postgres` and `adapters/valkey`) are gated behind the `integration` build tag and require the Postgres/Valkey containers above (`docker compose up -d postgres valkey`); they exercise real concurrency (goroutine races against actual row locks, actual Valkey Lua scripts) for things a fake can't prove, e.g.:
   - Exactly one winner among concurrent refund/cancel-intent/lease-acquire attempts
   - Optimistic-lock conflicts under concurrent `UpdateStatus`
   - Outbox claim visibility (a claimed event is invisible to a second poller) and stale-claim reclamation
@@ -730,4 +880,6 @@ JOB=lease_expiry go run ./cmd/jobs
   - Rate-limiter atomicity under 50 concurrent goroutines against a capacity of 10
 
 Run unit tests: `go test ./...`
-Run integration tests: `go test -tags=integration ./...` (with the docker-compose stack running)
+Run integration tests: `go test -tags=integration ./...` (with `docker compose up -d postgres valkey` running)
+
+The test DB connection can be overridden via `PAYMENT_TEST_DB_HOST`, `PAYMENT_TEST_DB_PORT`, `PAYMENT_TEST_DB_NAME`, `PAYMENT_TEST_DB_USER`, `PAYMENT_TEST_DB_PASSWORD`, `PAYMENT_TEST_DB_SSLMODE` (see `internal/testsupport/pg.go:72`).

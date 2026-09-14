@@ -12,15 +12,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/adapters/postgres"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
-	"samarth/payment-service/internal/testsupport"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
-func newTxn(t *testing.T) *transaction.Transaction {
+func newTxn(t *testing.T) *transaction.Txn {
 	t.Helper()
-	txn, err := transaction.New(uuid.New(), 150000, "INR", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order #42", map[string]any{"source": "test"}, 30)
+	txn, err := transaction.New(uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order #42", map[string]any{"source": "test"}, 30)
 	if err != nil {
 		t.Fatalf("build transaction: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestTransactionRoundTrip_JSONB(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 
 	txn := newTxn(t)
@@ -65,7 +65,7 @@ func TestOptimisticLock_Conflict(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 
 	txn := newTxn(t)
@@ -96,7 +96,7 @@ func TestOptimisticLock_ConcurrentSingleWinner(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 
 	txn := newTxn(t)
@@ -137,7 +137,7 @@ func TestTransactor_RollsBackOnError(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 	txn := newTxn(t)
 
@@ -162,7 +162,7 @@ func TestReads_JoinAmbientTransaction(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 	txn := newTxn(t)
 
@@ -189,15 +189,15 @@ func TestTransactor_CommitsTransactionAndOutboxAtomically(t *testing.T) {
 	pg.Truncate(t, "transactions", "outbox_events")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
-	outbox := postgres.NewOutboxWriter(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
+	outbox := postgres.NewOutboxWriter(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 	txn := newTxn(t)
 
 	event := ports.OutboxEvent{
 		AggregateID:   txn.ID,
 		AggregateType: "transaction",
-		EventType:     ports.EventTypePaymentCreated,
+		EventType:     ports.EventTypeTransactionCreated,
 		Payload:       []byte(`{"transaction_id":"` + txn.ID.String() + `"}`),
 		EventVersion:  1,
 	}
@@ -229,8 +229,8 @@ func TestLease_SingleFlight(t *testing.T) {
 	pg.Truncate(t, "transactions", "processing_lease")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
-	lease := postgres.NewLeaseRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
+	lease := postgres.NewLeaseRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 
 	txn := newTxn(t)
@@ -272,14 +272,14 @@ func TestOutbox_WritePollMarkPublished(t *testing.T) {
 	pg.Truncate(t, "outbox_events")
 	ctx := context.Background()
 
-	outbox := postgres.NewOutboxWriter(pg.DB, pg.Q)
+	outbox := postgres.NewOutboxWriter(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 	aggID := uuid.New()
 
 	event := ports.OutboxEvent{
 		AggregateID:   aggID,
 		AggregateType: "transaction",
-		EventType:     ports.EventTypePaymentSucceeded,
+		EventType:     ports.EventTypeTransactionSucceeded,
 		Payload:       []byte(`{"ok":true}`),
 		EventVersion:  1,
 	}
@@ -315,7 +315,7 @@ func writeOutboxEvent(t *testing.T, pg *testsupport.PG, outbox *postgres.OutboxW
 	event := ports.OutboxEvent{
 		AggregateID:   aggID,
 		AggregateType: "transaction",
-		EventType:     ports.EventTypePaymentCreated,
+		EventType:     ports.EventTypeTransactionCreated,
 		Payload:       []byte(`{"ok":true}`),
 		EventVersion:  1,
 	}
@@ -332,7 +332,7 @@ func TestOutbox_SeedPartitionsAbsorbCurrentWrites(t *testing.T) {
 
 	// No partition_manager run here — the migration's deploy-relative seed alone
 	// must place a NOW()-dated write in a dated weekly partition, not outbox_default.
-	aggID := writeOutboxEvent(t, pg, postgres.NewOutboxWriter(pg.DB, pg.Q))
+	aggID := writeOutboxEvent(t, pg, postgres.NewOutboxWriter(pg.DB))
 
 	var partition string
 	if err := pg.DB.Pool().QueryRow(ctx,
@@ -350,7 +350,7 @@ func TestOutbox_ClaimHidesEventFromConcurrentPoller(t *testing.T) {
 	pg.Truncate(t, "outbox_events")
 	ctx := context.Background()
 
-	outbox := postgres.NewOutboxWriter(pg.DB, pg.Q)
+	outbox := postgres.NewOutboxWriter(pg.DB)
 	writeOutboxEvent(t, pg, outbox)
 
 	// First poller claims the event (PENDING -> PUBLISHING).
@@ -378,7 +378,7 @@ func TestOutbox_StaleClaimIsReclaimed(t *testing.T) {
 	pg.Truncate(t, "outbox_events")
 	ctx := context.Background()
 
-	outbox := postgres.NewOutboxWriter(pg.DB, pg.Q)
+	outbox := postgres.NewOutboxWriter(pg.DB)
 	outbox.SetClaimTTL(200 * time.Millisecond)
 	writeOutboxEvent(t, pg, outbox)
 
@@ -405,7 +405,7 @@ func TestOutbox_MarkFailedReleasesClaimForRetry(t *testing.T) {
 	pg.Truncate(t, "outbox_events")
 	ctx := context.Background()
 
-	outbox := postgres.NewOutboxWriter(pg.DB, pg.Q)
+	outbox := postgres.NewOutboxWriter(pg.DB)
 	writeOutboxEvent(t, pg, outbox)
 
 	claimed, err := outbox.PollPending(ctx, testsupport.AllShards(), 10)
@@ -436,7 +436,7 @@ func TestTransaction_ProcessingTimeoutRoundTrips(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 
 	// Includes durations >= 1 day, which Postgres renders as "1 day ..." — the
@@ -467,7 +467,7 @@ func TestUpdateStatus_NotFoundIsDistinctFromVersionConflict(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 
 	// (a) A transaction that was never inserted must surface as ErrNotFound,
@@ -503,7 +503,7 @@ func TestTransactor_PanicInsideRollsBack(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	repo := postgres.NewTransactionRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 	txn := newTxn(t)
 

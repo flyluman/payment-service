@@ -38,7 +38,7 @@ func isValidTransition(from, to Status) bool {
 	return false
 }
 
-func applyTransitionEffects(tx *Transaction, from, to Status, now time.Time) {
+func applyTransitionEffects(tx *Txn, from, to Status, now time.Time) {
 	switch {
 	case to == StatusFailed || to == StatusCancelled || to == StatusSucceeded:
 		if from == StatusProcessing {
@@ -48,7 +48,7 @@ func applyTransitionEffects(tx *Transaction, from, to Status, now time.Time) {
 	}
 }
 
-func TransitionState(tx *Transaction, toState Status, actor Actor) error {
+func TransitionState(tx *Txn, toState Status, actor Actor) error {
 	if tx == nil {
 		return fmt.Errorf("transaction: nil transaction")
 	}

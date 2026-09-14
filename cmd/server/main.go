@@ -1,0 +1,288 @@
+package main
+
+import (
+	"context"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/crownroutes/payment-service/config"
+	"github.com/crownroutes/payment-service/internal/adapters/broadcast"
+	"github.com/crownroutes/payment-service/internal/adapters/encryption"
+	"github.com/crownroutes/payment-service/internal/adapters/gateways"
+	"github.com/crownroutes/payment-service/internal/adapters/observability"
+	notifadapter "github.com/crownroutes/payment-service/internal/adapters/notification"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
+	"github.com/crownroutes/payment-service/internal/adapters/valkey"
+	"github.com/crownroutes/payment-service/internal/app/cancel"
+	"github.com/crownroutes/payment-service/internal/app/dispute"
+	notifapp "github.com/crownroutes/payment-service/internal/app/notification"
+	"github.com/crownroutes/payment-service/internal/app/gateway"
+	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	"github.com/crownroutes/payment-service/internal/app/payment"
+	"github.com/crownroutes/payment-service/internal/app/refund"
+	"github.com/crownroutes/payment-service/internal/app/webhook"
+	"github.com/crownroutes/payment-service/internal/bootstrap"
+	"github.com/crownroutes/payment-service/internal/ports"
+)
+
+// deps holds every shared resources initialised once in main and passed to each
+// subsystem goroutine. Nothing here is goroutine-safe on its own; the goroutines
+// receive a read-only view and use their own synchronisation internally.
+type deps struct {
+	cfg     *config.Config
+	logger  *observability.SlogLogger
+	metrics ports.MetricRecorder
+
+	db      *postgres.DB
+
+	txnRepo          *postgres.TransactionRepository
+	refundRepo       *postgres.RefundRepository
+	outboxWriter     *postgres.OutboxWriter
+	leaseRepo        *postgres.LeaseRepository
+	transactor       *postgres.Transactor
+	configStore      *postgres.ConfigStore
+	idempotencyRepo  *postgres.IdempotencyRepository
+	webhookRepo      *postgres.WebhookRepository
+	tenantConfigStore *postgres.TenantConfigStore
+
+	registry  *gateways.Registry
+	gatewaySvc *gateway.Service
+	paymentSvc *payment.Service
+	refundSvc  *refund.Service
+	cancelSvc  *cancel.Service
+	webhookSvc *webhook.Service
+	disputeSvc *dispute.Service
+	notifSvc   *notifapp.Service
+
+	valkeyClient *valkey.Client
+	rateLimiter  *valkey.RateLimiter
+	cbStore      *valkey.CircuitBreakerStore
+	intentStore  *valkey.IntentStore
+
+	eventBus *broadcast.InMemoryBus
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return h
+}
+
+func run() error {
+	// ── Config ───────────────────────────────────────────────────────────
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	logger := observability.NewSlogLogger(
+		bootstrap.ParseLogLevel(cfg.Observability.LogLevel),
+		cfg.App.ServiceName, cfg.App.ServiceVersion,
+		cfg.App.Environment, hostname(),
+	)
+
+	// Root context: cancelled on SIGINT / SIGTERM so every goroutine drains.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// ── Metrics ──────────────────────────────────────────────────────────
+	metrics, metricsClose, err := observability.NewMetrics(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("init metrics: %w", err)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = metricsClose(flushCtx)
+	}()
+
+	// ── Postgres ─────────────────────────────────────────────────────────
+	connectPolicy := bootstrap.RetryPolicy{
+		Attempts:       cfg.Startup.ConnectMaxAttempts,
+		AttemptTimeout: cfg.Startup.ConnectAttemptTimeout,
+		Backoff:        cfg.Startup.ConnectBackoff,
+	}
+
+	var db *postgres.DB
+	if err := bootstrap.Connect(ctx, logger, "postgres", connectPolicy, func(c context.Context) error {
+		db, err = postgres.New(c, cfg.Database)
+		return err
+	}); err != nil {
+		return err
+	}
+	defer db.Close()
+
+
+	// ── Valkey ───────────────────────────────────────────────────────────
+	valkeyClient, err := valkey.New(cfg.Valkey)
+	if err != nil {
+		return fmt.Errorf("connect valkey: %w", err)
+	}
+	defer valkeyClient.Close()
+	if err := bootstrap.Connect(ctx, logger, "valkey", connectPolicy, valkeyClient.Ping); err != nil {
+		return err
+	}
+	rateLimiter := valkey.NewRateLimiter(valkeyClient, cfg.RateLimit, logger, metrics)
+	defer rateLimiter.Close()
+
+	// ── Repositories ─────────────────────────────────────────────────────
+	txnRepo := postgres.NewTransactionRepository(db)
+	txnRepo.SetCache(valkeyClient)
+	refundRepo := postgres.NewRefundRepository(db)
+	outboxWriter := postgres.NewOutboxWriter(db)
+	leaseRepo := postgres.NewLeaseRepository(db)
+	transactor := postgres.NewTransactor(db)
+	configStore := postgres.NewConfigStore(db)
+	configStore.SetCache(valkeyClient)
+	idempotencyRepo := postgres.NewIdempotencyRepository(db)
+	webhookRepo := postgres.NewWebhookRepository(db)
+	var encryptor postgres.Encryptor
+	if encKeyHex := cfg.Security.EncryptionKey; encKeyHex != "" {
+		encKey, err := hex.DecodeString(encKeyHex)
+		if err != nil {
+			return fmt.Errorf("ENCRYPTION_KEY: hex decode: %w", err)
+		}
+		km, err := encryption.NewLocalKeyManager("master", encKey)
+		if err != nil {
+			return fmt.Errorf("init encryption key manager: %w", err)
+		}
+		encryptor = encryption.NewEnvelope(km, encryption.Config{})
+		logger.Info("encryption.enabled", nil)
+	} else if cfg.App.Environment == "production" {
+		return fmt.Errorf("ENCRYPTION_KEY is required in production — gateway credentials must not be stored as plaintext")
+	} else {
+		logger.Warn("encryption.disabled", map[string]any{
+			"reason": "ENCRYPTION_KEY not set — gateway credentials stored as plaintext",
+		})
+	}
+	tenantConfigStore := postgres.NewTenantConfigStore(db, encryptor)
+
+	// ── Services ─────────────────────────────────────────────────────────
+	registry := bootstrap.GatewayRegistry(cfg, tenantConfigStore)
+
+	paymentSvc := payment.NewService(
+		txnRepo, outboxWriter, configStore, transactor, leaseRepo,
+		registry, logger, metrics,
+	)
+	refundSvc := refund.NewService(txnRepo, refundRepo, outboxWriter, transactor, registry, logger, metrics)
+	cancelSvc := cancel.NewService(txnRepo, logger, metrics)
+	paymentSvc.SetCancelResolver(refundSvc)
+	paymentSvc.SetGatewayMetadataStore(webhookRepo)
+
+	webhookSvc := webhook.NewService(txnRepo, webhookRepo, outboxWriter, transactor, logger, metrics)
+
+	disputeStore := postgres.NewDisputeStore(db)
+	disputeEvidenceStore := postgres.NewDisputeEvidenceStore(db)
+	disputeSvc := dispute.NewService(disputeStore, disputeEvidenceStore)
+
+	notifStore := postgres.NewNotificationStore(db)
+	notifTemplateStore := postgres.NewNotificationTemplateStore(db)
+	notifPrefStore := postgres.NewNotificationPreferenceStore(db)
+	notifEmailSender := notifadapter.NewSMTPEmailSender(notifadapter.SMTPConfig{})
+	notifSMSSender := notifadapter.NewStubSMSSender(notifadapter.SMSConfig{})
+	notifSvc := notifapp.NewService(notifStore, notifTemplateStore, notifPrefStore, notifEmailSender, notifSMSSender)
+
+	// ── Event bus (SSE) ──────────────────────────────────────────────────
+	eventBus := broadcast.NewInMemoryBus()
+	paymentSvc.SetEventBus(eventBus)
+	webhookSvc.SetEventBus(eventBus)
+
+	// ── Idempotency ──────────────────────────────────────────────────────
+	idemGuard := idempotency.NewGuard(idempotencyRepo, transactor)
+	paymentSvc.SetIdempotency(idemGuard)
+	refundSvc.SetIdempotency(idemGuard)
+	cancelSvc.SetIdempotency(idemGuard)
+
+	// ── Circuit breaker + intent tracking ────────────────────────────────
+	cbStore := valkey.NewCircuitBreakerStore(valkeyClient)
+	paymentSvc.SetCircuitBreaker(circuitBreakerAdapter{
+		store:     cbStore,
+		threshold: cfg.Gateway.CircuitBreakerThreshold,
+	})
+	intentStore := valkey.NewIntentStore(valkeyClient)
+	paymentSvc.SetIntentTracker(intentStore)
+
+	gatewaySvc := gateway.NewService(
+		configStore,
+		gatewaysBreakerAdapter{store: cbStore},
+		logger,
+		metrics,
+	)
+
+	d := &deps{
+		cfg:     cfg,
+		logger:  logger,
+		metrics: metrics,
+
+		db:      db,
+
+		txnRepo:         txnRepo,
+		refundRepo:      refundRepo,
+		outboxWriter:    outboxWriter,
+		leaseRepo:       leaseRepo,
+		transactor:      transactor,
+		configStore:     configStore,
+		idempotencyRepo: idempotencyRepo,
+		webhookRepo:     webhookRepo,
+		tenantConfigStore: tenantConfigStore,
+
+		registry:   registry,
+		gatewaySvc: gatewaySvc,
+		paymentSvc: paymentSvc,
+		refundSvc:  refundSvc,
+		cancelSvc:  cancelSvc,
+		webhookSvc: webhookSvc,
+		disputeSvc: disputeSvc,
+		notifSvc:   notifSvc,
+
+		valkeyClient: valkeyClient,
+		rateLimiter:  rateLimiter,
+		cbStore:      cbStore,
+		intentStore:  intentStore,
+		eventBus:     eventBus,
+	}
+
+	// ── Launch subsystems ────────────────────────────────────────────────
+	logger.Info("service.starting", map[string]any{
+		"port": cfg.App.Port,
+	})
+
+	var wg sync.WaitGroup
+	errc := make(chan error, 3)
+
+	wg.Add(3)
+	go func() { defer wg.Done(); errc <- startAPI(ctx, d) }()
+	go func() { defer wg.Done(); errc <- startRelay(ctx, d) }()
+	go func() { defer wg.Done(); errc <- startJobs(ctx, d) }()
+
+	// Wait for the first subsystem to return. A cancelled context (from signal)
+	// makes all three return; we only care about the first real error.
+	firstErr := <-errc
+	stop() // propagate shutdown to the other two
+
+	// Give the remaining goroutines a moment to drain, but don't block forever.
+	go func() { wg.Wait(); close(errc) }()
+
+	select {
+	case <-errc:
+	case <-time.After(15 * time.Second):
+		logger.Warn("service.shutdown_timeout", nil)
+	}
+
+	logger.Info("service.stopped", nil)
+	return firstErr
+}

@@ -11,15 +11,16 @@ import (
 
 type IdempotencyRepository struct {
 	db *DB
-	q  *Queries
 }
 
-func NewIdempotencyRepository(db *DB, q *Queries) *IdempotencyRepository {
-	return &IdempotencyRepository{db: db, q: q}
+func NewIdempotencyRepository(db *DB) *IdempotencyRepository {
+	return &IdempotencyRepository{db: db}
 }
 
 func (r *IdempotencyRepository) Reserve(ctx context.Context, compositeHash, requestHash string) (bool, error) {
-	tag, err := queryer(ctx, r.db.pool).Exec(ctx, r.q.IdempotencyReserve, compositeHash, requestHash)
+	tag, err := queryer(ctx, r.db.pool).Exec(ctx, `INSERT INTO idempotency_keys (composite_key_hash, request_hash, response, status)
+VALUES ($1, $2, '{}'::jsonb, 'PROCESSING')
+ON CONFLICT (composite_key_hash) DO NOTHING`, compositeHash, requestHash)
 	if err != nil {
 		return false, fmt.Errorf("idempotency: reserve %s: %w", compositeHash, err)
 	}
@@ -27,7 +28,9 @@ func (r *IdempotencyRepository) Reserve(ctx context.Context, compositeHash, requ
 }
 
 func (r *IdempotencyRepository) Lookup(ctx context.Context, compositeHash string) (found bool, requestHash, status string, response []byte, err error) {
-	err = queryer(ctx, r.db.pool).QueryRow(ctx, r.q.IdempotencyLookup, compositeHash).Scan(&requestHash, &status, &response)
+	err = queryer(ctx, r.db.pool).QueryRow(ctx, `SELECT request_hash, status, response
+FROM idempotency_keys
+WHERE composite_key_hash = $1`, compositeHash).Scan(&requestHash, &status, &response)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, "", "", nil, nil
 	}
@@ -38,21 +41,25 @@ func (r *IdempotencyRepository) Lookup(ctx context.Context, compositeHash string
 }
 
 func (r *IdempotencyRepository) Complete(ctx context.Context, compositeHash string, response []byte) error {
-	if _, err := queryer(ctx, r.db.pool).Exec(ctx, r.q.IdempotencyComplete, compositeHash, string(response)); err != nil {
+	if _, err := queryer(ctx, r.db.pool).Exec(ctx, `UPDATE idempotency_keys
+SET response = $2, status = 'COMPLETED'
+WHERE composite_key_hash = $1`, compositeHash, string(response)); err != nil {
 		return fmt.Errorf("idempotency: complete %s: %w", compositeHash, err)
 	}
 	return nil
 }
 
 func (r *IdempotencyRepository) Release(ctx context.Context, compositeHash string) error {
-	if _, err := queryer(ctx, r.db.pool).Exec(ctx, r.q.IdempotencyRelease, compositeHash); err != nil {
+	if _, err := queryer(ctx, r.db.pool).Exec(ctx, `DELETE FROM idempotency_keys WHERE composite_key_hash = $1`, compositeHash); err != nil {
 		return fmt.Errorf("idempotency: release %s: %w", compositeHash, err)
 	}
 	return nil
 }
 
 func (r *IdempotencyRepository) SweepStaleProcessing(ctx context.Context, olderThan time.Duration) (int64, error) {
-	tag, err := r.db.pool.Exec(ctx, r.q.IdempotencySweepStaleProcessing, int64(olderThan.Seconds()))
+	tag, err := r.db.pool.Exec(ctx, `DELETE FROM idempotency_keys
+WHERE status = 'PROCESSING'
+  AND created_at < NOW() - ($1 * INTERVAL '1 second')`, int64(olderThan.Seconds()))
 	if err != nil {
 		return 0, fmt.Errorf("idempotency: sweep stale processing: %w", err)
 	}
@@ -60,7 +67,7 @@ func (r *IdempotencyRepository) SweepStaleProcessing(ctx context.Context, olderT
 }
 
 func (r *IdempotencyRepository) DeleteExpired(ctx context.Context) (int64, error) {
-	tag, err := r.db.pool.Exec(ctx, r.q.IdempotencyDeleteExpired)
+	tag, err := r.db.pool.Exec(ctx, `DELETE FROM idempotency_keys WHERE expires_at < NOW()`)
 	if err != nil {
 		return 0, fmt.Errorf("idempotency: delete expired: %w", err)
 	}

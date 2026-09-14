@@ -6,17 +6,17 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type fakeStore struct {
-	txn       *transaction.Transaction
+	txn       *transaction.Txn
 	setResult bool
 	setCalls  int
 }
 
-func (f *fakeStore) GetByID(context.Context, uuid.UUID) (*transaction.Transaction, error) {
+func (f *fakeStore) GetByID(context.Context, uuid.UUID) (*transaction.Txn, error) {
 	return f.txn, nil
 }
 func (f *fakeStore) SetCancelIntent(context.Context, uuid.UUID, transaction.Actor, transaction.CancelVia) (bool, error) {
@@ -39,8 +39,8 @@ func (noopMetrics) Increment(string, map[string]string)          {}
 func (noopMetrics) Histogram(string, float64, map[string]string) {}
 func (noopMetrics) Gauge(string, float64, map[string]string)     {}
 
-func txnWith(status transaction.Status, intent bool) *transaction.Transaction {
-	t, _ := transaction.New(uuid.New(), 1000, "INR", transaction.PaymentMethodCard, "stripe", uuid.New(), "", "", nil, 30)
+func txnWith(status transaction.Status, intent bool) *transaction.Txn {
+	t, _ := transaction.New(uuid.New(), uuid.New(), 1000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "", "", nil, 30)
 	t.Status = status
 	t.CancelIntent = intent
 	return t
@@ -82,7 +82,7 @@ func TestCancel_SetsIntent(t *testing.T) {
 	store := &fakeStore{txn: txnWith(transaction.StatusProcessing, false), setResult: true}
 	s := NewService(store, noopLogger{}, noopMetrics{})
 
-	res, err := s.Cancel(context.Background(), CancelInput{TransactionID: store.txn.ID, By: transaction.ActorMerchant, Via: transaction.CancelViaAPI})
+	res, err := s.Cancel(context.Background(), CancelInput{TransactionID: store.txn.ID, By: transaction.ActorTenant, Via: transaction.CancelViaAPI})
 	if err != nil {
 		t.Fatal(err)
 	}

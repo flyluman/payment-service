@@ -43,7 +43,7 @@ const (
 	MetricRateLimitAllowed                  = "rate_limit.allowed"
 	MetricRateLimitRejected                 = "rate_limit.rejected"
 	MetricRateLimitFallbackActive           = "rate_limit.fallback_active"
-	MetricRateLimitRedisAvailable           = "rate_limit_redis_available"
+	MetricRateLimitValkeyAvailable           = "rate_limit_valkey_available"
 	MetricRateLimitFallbackActivationsTotal = "rate_limit_fallback_activations_total"
 	MetricRateLimitFallbackDurationSeconds  = "rate_limit_fallback_duration_seconds"
 
@@ -68,13 +68,13 @@ const (
 	MetricTLSCertExpirySeconds = "tls_cert_expiry_seconds"
 )
 
-func StandardTags(env, version, gatewayID, paymentMethod, merchantID string) map[string]string {
+func StandardTags(env, version, gatewayID, paymentMethod, tenantID string) map[string]string {
 	return map[string]string{
 		"environment":     env,
 		"service_version": version,
 		"gateway_id":      gatewayID,
 		"payment_method":  paymentMethod,
-		"merchant_id":     merchantID,
+		"tenant_id":       tenantID,
 	}
 }
 

@@ -21,7 +21,7 @@ func TestTransitionState_ValidTransitions(t *testing.T) {
 		{StatusRefundFailed, StatusRefunded},
 	}
 	for _, c := range cases {
-		tx := &Transaction{Status: c.from}
+		tx := &Txn{Status: c.from}
 		if err := TransitionState(tx, c.to, ActorSystem); err != nil {
 			t.Errorf("%s → %s: unexpected error %v", c.from, c.to, err)
 		}
@@ -45,7 +45,7 @@ func TestTransitionState_InvalidTransitions(t *testing.T) {
 		{StatusProcessing, StatusPending},
 	}
 	for _, c := range cases {
-		tx := &Transaction{Status: c.from}
+		tx := &Txn{Status: c.from}
 		err := TransitionState(tx, c.to, ActorSystem)
 		var invalid ErrInvalidTransition
 		if !errors.As(err, &invalid) {
@@ -60,7 +60,7 @@ func TestTransitionState_InvalidTransitions(t *testing.T) {
 func TestTransitionState_TerminalStatesHaveNoTransitions(t *testing.T) {
 	for _, terminal := range []Status{StatusCancelled, StatusRefunded} {
 		for _, to := range AllStatuses() {
-			tx := &Transaction{Status: terminal}
+			tx := &Txn{Status: terminal}
 			if err := TransitionState(tx, to, ActorSystem); err == nil {
 				t.Errorf("terminal %s → %s should be rejected", terminal, to)
 			}
@@ -69,7 +69,7 @@ func TestTransitionState_TerminalStatesHaveNoTransitions(t *testing.T) {
 }
 
 func TestTransitionState_FailedToCancelledRequiresCancelIntent(t *testing.T) {
-	tx := &Transaction{Status: StatusFailed, CancelIntent: false}
+	tx := &Txn{Status: StatusFailed, CancelIntent: false}
 	if err := TransitionState(tx, StatusCancelled, ActorSystem); err == nil {
 		t.Fatal("expected error for FAILED → CANCELLED without cancel intent")
 	}
@@ -77,7 +77,7 @@ func TestTransitionState_FailedToCancelledRequiresCancelIntent(t *testing.T) {
 		t.Errorf("status should remain FAILED, got %s", tx.Status)
 	}
 
-	tx = &Transaction{Status: StatusFailed, CancelIntent: true}
+	tx = &Txn{Status: StatusFailed, CancelIntent: true}
 	if err := TransitionState(tx, StatusCancelled, ActorSystem); err != nil {
 		t.Fatalf("expected success for FAILED → CANCELLED with cancel intent, got %v", err)
 	}
@@ -87,7 +87,7 @@ func TestTransitionState_ClearsLeaseFieldsLeavingProcessing(t *testing.T) {
 	now := time.Now().UTC()
 	timeout := 30 * time.Second
 	for _, to := range []Status{StatusSucceeded, StatusFailed} {
-		tx := &Transaction{
+		tx := &Txn{
 			Status:              StatusProcessing,
 			ProcessingStartedAt: &now,
 			ProcessingTimeout:   &timeout,
@@ -108,7 +108,7 @@ func TestTransitionState_NilTransaction(t *testing.T) {
 }
 
 func TestTransitionState_UpdatesTimestamp(t *testing.T) {
-	tx := &Transaction{Status: StatusPending, UpdatedAt: time.Unix(0, 0)}
+	tx := &Txn{Status: StatusPending, UpdatedAt: time.Unix(0, 0)}
 	if err := TransitionState(tx, StatusProcessing, ActorSystem); err != nil {
 		t.Fatal(err)
 	}

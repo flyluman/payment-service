@@ -3,7 +3,6 @@ package config
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 // validatableConfig returns a Config that passes every Validate rule, so a test
@@ -18,10 +17,6 @@ func validatableConfig() *Config {
 	c.Outbox.ClaimTTLSec = 60
 	c.Outbox.WorkerCount = 1
 	c.RateLimit.FallbackMultiplier = 0.5
-	c.Routing.FXReconciliationTolerancePct = 1.0
-	c.Gateway.HTTPTimeout = 30 * time.Second
-	c.Gateway.MaxAttempts = 3
-	c.Jobs.IdempotencyProcessingTimeoutSec = 300
 	return c
 }
 
@@ -38,7 +33,7 @@ func TestValidate_SNSPublisherRequiresTopic(t *testing.T) {
 	// rather than boot a relay that can't deliver anything.
 	c.Outbox.Publisher = "sns"
 	err := Validate(c)
-	if err == nil || !strings.Contains(err.Error(), "SNS_PAYMENT_EVENTS_TOPIC") {
+	if err == nil || !strings.Contains(err.Error(), "sns.payment_events_topic") {
 		t.Fatalf("expected missing-topic error for sns publisher, got: %v", err)
 	}
 
@@ -51,25 +46,9 @@ func TestValidate_SNSPublisherRequiresTopic(t *testing.T) {
 func TestValidate_RejectsUnknownPublisher(t *testing.T) {
 	c := validatableConfig()
 	c.Outbox.Publisher = "kafka"
-	if err := Validate(c); err == nil || !strings.Contains(err.Error(), "OUTBOX_PUBLISHER") {
+	if err := Validate(c); err == nil || !strings.Contains(err.Error(), "outbox.publisher") {
 		t.Fatalf("expected unknown-publisher error, got: %v", err)
 	}
 }
 
-func TestValidate_IdempotencyTimeoutMustExceedGatewayBudget(t *testing.T) {
-	c := validatableConfig() // budget = 3 * 30s = 90s
 
-	// At the budget boundary (90s) it must fail — the reaper could release a
-	// reservation for an operation still within its gateway retry window.
-	c.Jobs.IdempotencyProcessingTimeoutSec = 90
-	err := Validate(c)
-	if err == nil || !strings.Contains(err.Error(), "LEASE_REAPER_IDEMPOTENCY_TIMEOUT_SEC") {
-		t.Fatalf("expected gateway-budget validation error at the boundary, got: %v", err)
-	}
-
-	// Comfortably above the budget it passes.
-	c.Jobs.IdempotencyProcessingTimeoutSec = 120
-	if err := Validate(c); err != nil {
-		t.Fatalf("120s > 90s budget should validate, got: %v", err)
-	}
-}

@@ -9,16 +9,16 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/app/idempotency"
-	"samarth/payment-service/internal/domain/refund"
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	"github.com/crownroutes/payment-service/internal/domain/refund"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 var ErrNotRefundable = errors.New("refund: transaction is not in a refundable state")
 
 type TransactionReader interface {
-	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error)
+	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
 }
 
 type RefundRepo interface {
@@ -51,6 +51,7 @@ type Service struct {
 	tx       Transactor
 	gateways GatewayRegistry
 	idem     *idempotency.Guard
+	audit    ports.AuditLogStore
 	log      ports.Logger
 	metrics  ports.MetricRecorder
 }
@@ -60,6 +61,7 @@ func NewService(txns TransactionReader, refunds RefundRepo, outbox EventWriter, 
 }
 
 func (s *Service) SetIdempotency(g *idempotency.Guard) { s.idem = g }
+func (s *Service) SetAuditLogStore(a ports.AuditLogStore) { s.audit = a }
 
 type InitiateInput struct {
 	TransactionID  uuid.UUID
@@ -81,6 +83,8 @@ type idempotencyRefundResponse struct {
 type refundInitiatedPayload struct {
 	RefundID         string `json:"refund_id"`
 	TransactionID    string `json:"transaction_id"`
+	TenantID         string `json:"tenant_id"`
+	UserID           string `json:"user_id"`
 	Amount           int64  `json:"amount"`
 	Reason           string `json:"reason"`
 	AggregateVersion int    `json:"aggregate_version"`
@@ -115,7 +119,7 @@ func (s *Service) InitiateRefund(ctx context.Context, in InitiateInput) (Initiat
 	if in.IdempotencyKey == "" {
 		return InitiateResult{}, idempotency.ErrKeyRequired
 	}
-	composite := idempotency.Composite(parent.MerchantID.String(), "initiate_refund", in.IdempotencyKey)
+	composite := idempotency.Composite(parent.TenantID.String(), "initiate_refund", in.IdempotencyKey)
 	requestHash := idempotency.RequestHash(
 		in.TransactionID.String(), strconv.FormatInt(in.Amount, 10), in.Reason, in.InitiatedBy,
 	)
@@ -156,7 +160,7 @@ func (s *Service) InitiateRefund(ctx context.Context, in InitiateInput) (Initiat
 	}
 }
 
-func (s *Service) insertRefund(ctx context.Context, in InitiateInput, parent *transaction.Transaction) (*refund.Refund, error) {
+func (s *Service) insertRefund(ctx context.Context, in InitiateInput, parent *transaction.Txn) (*refund.Refund, error) {
 	if err := s.refunds.LockParentTransaction(ctx, in.TransactionID); err != nil {
 		return nil, err
 	}
@@ -179,6 +183,8 @@ func (s *Service) insertRefund(ctx context.Context, in InitiateInput, parent *tr
 	payload, err := json.Marshal(refundInitiatedPayload{
 		RefundID:         r.ID.String(),
 		TransactionID:    in.TransactionID.String(),
+		TenantID:         parent.TenantID.String(),
+		UserID:           parent.UserID.String(),
 		Amount:           r.Amount,
 		Reason:           r.Reason,
 		AggregateVersion: r.Version,
@@ -195,6 +201,15 @@ func (s *Service) insertRefund(ctx context.Context, in InitiateInput, parent *tr
 		AggregateVersion: r.Version,
 	}); err != nil {
 		return nil, fmt.Errorf("write refund event: %w", err)
+	}
+	if s.audit != nil {
+		_ = s.audit.WriteEntry(ctx, &ports.AuditEntry{
+			TransactionID: &r.TransactionID,
+			EventType:     ports.AuditEventTypeRefundInitiated,
+			Actor:         in.InitiatedBy,
+			NewState:      string(r.Status),
+			Reason:        in.Reason,
+		})
 	}
 	return r, nil
 }

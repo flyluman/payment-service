@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type stubAdapter struct{ ports.GatewayAdapter }

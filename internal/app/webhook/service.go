@@ -7,9 +7,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/transaction"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
+
+type callbackPayload struct {
+	TransactionID string `json:"transaction_id"`
+	Status        string `json:"status"`
+	CallbackURL   string `json:"callback_url"`
+}
 
 type Event struct {
 	EventID            string
@@ -18,20 +24,21 @@ type Event struct {
 }
 
 type Outcome struct {
-	Duplicate  bool
-	UnknownTxn bool
-	Resolved   bool
-	Status     transaction.Status
+	Duplicate     bool
+	UnknownTxn    bool
+	Resolved      bool
+	Status        transaction.Status
+	TransactionID uuid.UUID
 }
 
-type TransactionRepo interface {
-	GetByGatewayReference(ctx context.Context, gatewayID, reference string) (*transaction.Transaction, error)
-	UpdateStatus(ctx context.Context, t *transaction.Transaction) error
+type TransactionRepository interface {
+	GetByGatewayReference(ctx context.Context, gatewayID, reference string) (*transaction.Txn, error)
+	UpdateStatus(ctx context.Context, t *transaction.Txn) error
 }
 
 type WebhookRepo interface {
 	RecordEvent(ctx context.Context, eventID, gatewayID string) (bool, error)
-	InsertRawMetadata(ctx context.Context, transactionID uuid.UUID, gatewayID string, payload []byte) error
+	InsertGatewayMetadata(ctx context.Context, transactionID uuid.UUID, gatewayID string, payload []byte) error
 }
 
 type EventWriter interface {
@@ -43,17 +50,22 @@ type Transactor interface {
 }
 
 type Service struct {
-	txns     TransactionRepo
+	txns     TransactionRepository
 	webhooks WebhookRepo
 	outbox   EventWriter
 	tx       Transactor
+	audit    ports.AuditLogStore
 	log      ports.Logger
 	metrics  ports.MetricRecorder
+	bus      ports.EventBus
 }
 
-func NewService(txns TransactionRepo, webhooks WebhookRepo, outbox EventWriter, tx Transactor, log ports.Logger, metrics ports.MetricRecorder) *Service {
+func NewService(txns TransactionRepository, webhooks WebhookRepo, outbox EventWriter, tx Transactor, log ports.Logger, metrics ports.MetricRecorder) *Service {
 	return &Service{txns: txns, webhooks: webhooks, outbox: outbox, tx: tx, log: log, metrics: metrics}
 }
+
+func (s *Service) SetEventBus(bus ports.EventBus) { s.bus = bus }
+func (s *Service) SetAuditLogStore(a ports.AuditLogStore) { s.audit = a }
 
 type webhookEventPayload struct {
 	TransactionID    string `json:"transaction_id"`
@@ -84,7 +96,7 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 			return nil
 		}
 
-		if err := s.webhooks.InsertRawMetadata(ctx, txn.ID, gatewayID, rawPayload); err != nil {
+		if err := s.webhooks.InsertGatewayMetadata(ctx, txn.ID, gatewayID, rawPayload); err != nil {
 			return err
 		}
 
@@ -107,6 +119,17 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 			return err
 		}
 
+		if s.audit != nil {
+			_ = s.audit.WriteEntry(ctx, &ports.AuditEntry{
+				TransactionID: &txn.ID,
+				EventType:     ports.AuditEventTypeWebhookReceived,
+				Actor:         string(transaction.ActorGateway),
+				PreviousState: string(transaction.StatusProcessing),
+				NewState:      string(newStatus),
+				Reason:        "webhook_received",
+			})
+		}
+
 		event, err := s.buildEvent(txn, newStatus, gatewayID)
 		if err != nil {
 			return err
@@ -115,8 +138,30 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 			return err
 		}
 
+		if txn.CallbackURL != "" {
+			cbPayload, err := json.Marshal(callbackPayload{
+				TransactionID: txn.ID.String(),
+				Status:        string(newStatus),
+				CallbackURL:   txn.CallbackURL,
+			})
+			if err != nil {
+				return err
+			}
+			if err := s.outbox.Write(ctx, ports.OutboxEvent{
+				AggregateID:      txn.ID,
+				AggregateType:    "transaction",
+				EventType:        ports.EventTypeTransactionCallback,
+				Payload:          cbPayload,
+				EventVersion:     1,
+				AggregateVersion: txn.Version,
+			}); err != nil {
+				return err
+			}
+		}
+
 		outcome.Resolved = true
 		outcome.Status = newStatus
+		outcome.TransactionID = txn.ID
 		return nil
 	})
 	if err != nil {
@@ -131,14 +176,20 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 			ports.FieldGatewayID: gatewayID,
 			ports.FieldNewState:  string(outcome.Status),
 		})
+		if s.bus != nil {
+			s.bus.Publish(ctx, ports.StatusEvent{
+				TransactionID: outcome.TransactionID,
+				Status:        outcome.Status,
+			})
+		}
 	}
 	return outcome, nil
 }
 
-func (s *Service) buildEvent(txn *transaction.Transaction, status transaction.Status, gatewayID string) (ports.OutboxEvent, error) {
-	eventType := ports.EventTypePaymentFailed
+func (s *Service) buildEvent(txn *transaction.Txn, status transaction.Status, gatewayID string) (ports.OutboxEvent, error) {
+	eventType := ports.EventTypeTransactionFailed
 	if status == transaction.StatusSucceeded {
-		eventType = ports.EventTypePaymentSucceeded
+		eventType = ports.EventTypeTransactionSucceeded
 	}
 	payload, err := json.Marshal(webhookEventPayload{
 		TransactionID:    txn.ID.String(),

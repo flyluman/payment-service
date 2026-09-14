@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 const webhookToleranceSeconds = 300
@@ -22,6 +22,12 @@ type stripeWebhookEvent struct {
 			ID               string       `json:"id"`
 			Status           string       `json:"status"`
 			LastPaymentError *stripeError `json:"last_payment_error"`
+			NextAction       *struct {
+				Type           string `json:"type"`
+				RedirectToURL  *struct {
+					URL string `json:"url"`
+				} `json:"redirect_to_url,omitempty"`
+			} `json:"next_action"`
 		} `json:"object"`
 	} `json:"data"`
 }
@@ -57,6 +63,8 @@ func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret st
 		EventID:            ev.ID,
 		GatewayReferenceID: ev.Data.Object.ID,
 		Status:             mapStatusString(ev.Data.Object.Status, ev.Data.Object.LastPaymentError != nil),
+		EventType:          ev.Type,
+		GatewayMetadata: extractStripeWebhookMetadata(ev),
 	}, nil
 }
 
@@ -93,4 +101,16 @@ func mapStatusString(s string, hasError bool) ports.GatewayPaymentStatus {
 	default:
 		return ports.GatewayPaymentStatusPending
 	}
+}
+
+func extractStripeWebhookMetadata(ev stripeWebhookEvent) map[string]any {
+	meta := map[string]any{}
+	if ev.Data.Object.NextAction != nil {
+		na := map[string]any{"type": ev.Data.Object.NextAction.Type}
+		if ev.Data.Object.NextAction.RedirectToURL != nil {
+			na["redirect_url"] = ev.Data.Object.NextAction.RedirectToURL.URL
+		}
+		meta["next_action"] = na
+	}
+	return meta
 }

@@ -7,7 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/api/response"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type Role string
@@ -18,23 +19,46 @@ const (
 )
 
 type Principal struct {
-	Role       Role
-	MerchantID string
+	Role     Role
+	TenantID string
+	UserID   string
 }
 type TokenProvider interface {
 	Resolve(ctx context.Context, role Role, token string) (Principal, bool, error)
 }
 
 const principalKey contextKey = "principal"
-const merchantIDKey contextKey = "merchant_id"
+
+const tenantIDKey contextKey = "tenant_id"
+const userIDKey contextKey = "user_id"
 
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(principalKey).(Principal)
 	return p, ok
 }
 
-func MerchantIDFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(merchantIDKey).(string); ok {
+// ContextWithPrincipal is primarily used for testing or internal routing.
+func ContextWithPrincipal(ctx context.Context, p Principal) context.Context {
+	ctx = context.WithValue(ctx, principalKey, p)
+	if p.TenantID != "" {
+		ctx = context.WithValue(ctx, tenantIDKey, p.TenantID)
+	}
+	if p.UserID != "" {
+		ctx = context.WithValue(ctx, userIDKey, p.UserID)
+	}
+	return ctx
+}
+
+
+func TenantIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(tenantIDKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func UserIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(userIDKey).(string); ok {
 		return v
 	}
 	return ""
@@ -43,27 +67,50 @@ func MerchantIDFromContext(ctx context.Context) string {
 func Authenticate(provider TokenProvider, log ports.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/health" || strings.HasPrefix(r.URL.Path, "/webhooks/") {
+			path := r.URL.Path
+
+			// Hard-exempt: no service token possible
+			if path == "/health" || path == "/favicon.ico" || strings.HasPrefix(path, "/webhooks/") || strings.HasPrefix(path, "/pay/") {
 				next.ServeHTTP(w, r)
 				return
 			}
 
+			// Soft-exempt: try service token, pass through on failure (browser uses checkout token)
+			if r.Method == "GET" && strings.HasPrefix(path, "/api/v1/payments/") {
+				rest := path[len("/api/v1/payments/"):]
+				if !strings.Contains(rest, "/") || (strings.Count(rest, "/") == 1 && strings.HasSuffix(rest, "/events")) {
+					principal, ok := authenticate(r, provider)
+					if ok {
+						next.ServeHTTP(w, r.WithContext(setPrincipalContext(r.Context(), principal)))
+					} else {
+						next.ServeHTTP(w, r)
+					}
+					return
+				}
+			}
+
+			// All other paths: require valid service token
 			principal, ok := authenticate(r, provider)
 			if !ok {
-				log.Warn("auth.rejected", map[string]any{"path": r.URL.Path})
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"missing or invalid service token"}}`))
+				log.Warn("auth.rejected", map[string]any{"path": path})
+				response.WriteError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid service token", RequestIDFromContext(r.Context()))
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), principalKey, principal)
-			if principal.MerchantID != "" {
-				ctx = context.WithValue(ctx, merchantIDKey, principal.MerchantID)
-			}
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r.WithContext(setPrincipalContext(r.Context(), principal)))
 		})
 	}
+}
+
+func setPrincipalContext(ctx context.Context, p Principal) context.Context {
+	ctx = context.WithValue(ctx, principalKey, p)
+	if p.TenantID != "" {
+		ctx = context.WithValue(ctx, tenantIDKey, p.TenantID)
+	}
+	if p.UserID != "" {
+		ctx = context.WithValue(ctx, userIDKey, p.UserID)
+	}
+	return ctx
 }
 
 func authenticate(r *http.Request, provider TokenProvider) (Principal, bool) {
@@ -115,12 +162,13 @@ func (p *StaticTokenProvider) HasAny() bool { return len(p.service) > 0 || len(p
 
 func servicePrincipals(tokens map[string]string) map[string]Principal {
 	set := make(map[string]Principal, len(tokens))
-	for token, merchantID := range tokens {
+	for token, raw := range tokens {
 		if token == "" {
 			continue
 		}
 		sum := sha256.Sum256([]byte(token))
-		set[hex.EncodeToString(sum[:])] = Principal{Role: RoleService, MerchantID: merchantID}
+		tenantID, userID := splitPrincipal(raw)
+		set[hex.EncodeToString(sum[:])] = Principal{Role: RoleService, TenantID: tenantID, UserID: userID}
 	}
 	return set
 }
@@ -135,4 +183,16 @@ func opsPrincipals(tokens []string) map[string]Principal {
 		set[hex.EncodeToString(sum[:])] = Principal{Role: RoleOps}
 	}
 	return set
+}
+
+func splitPrincipal(raw string) (tenantID, userID string) {
+	parts := strings.SplitN(raw, ":", 2)
+	switch len(parts) {
+	case 0:
+		return "", ""
+	case 1:
+		return strings.TrimSpace(parts[0]), ""
+	default:
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
 }

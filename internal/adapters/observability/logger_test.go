@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 func captureLogger(buf *bytes.Buffer) *SlogLogger {
@@ -128,10 +128,10 @@ func TestSlogLogger_RedactsSensitiveFields(t *testing.T) {
 	})
 
 	entry := lastEntry(t, &buf)
-	if entry["vpa"] != "[REDACTED]" {
+	if entry["vpa"] != "<redacted>" {
 		t.Errorf("expected vpa redacted, got %v", entry["vpa"])
 	}
-	if entry["CARD_NUMBER"] != "[REDACTED]" {
+	if entry["CARD_NUMBER"] != "<redacted>" {
 		t.Errorf("expected card_number redacted (case-insensitive), got %v", entry["CARD_NUMBER"])
 	}
 	if entry["transaction_id"] != "tx-1" {

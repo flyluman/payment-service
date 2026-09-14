@@ -9,16 +9,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"samarth/payment-service/internal/domain/refund"
+	"github.com/crownroutes/payment-service/internal/domain/refund"
 )
 
 type RefundRepository struct {
 	db *DB
-	q  *Queries
 }
 
-func NewRefundRepository(db *DB, q *Queries) *RefundRepository {
-	return &RefundRepository{db: db, q: q}
+func NewRefundRepository(db *DB) *RefundRepository {
+	return &RefundRepository{db: db}
 }
 
 var ErrRefundNotFound = errors.New("refund not found")
@@ -35,7 +34,15 @@ func (r *RefundRepository) Insert(ctx context.Context, rf *refund.Refund) error 
 		return fmt.Errorf("refund: marshal failure_reason: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, r.q.RefundInsert,
+	_, err = tx.Exec(ctx, `INSERT INTO refunds (
+    id, transaction_id, amount, reason, status,
+    initiated_by, gateway_refund_id, attempted_gateway, actual_gateway,
+    attempts, failure_reason, initiated_at, resolved_at, version
+) VALUES (
+    $1, $2, $3, $4, $5,
+    $6, $7, $8, $9,
+    $10, $11, $12, $13, $14
+)`,
 		rf.ID, rf.TransactionID, rf.Amount, rf.Reason, rf.Status,
 		rf.InitiatedBy, rf.GatewayRefundID, rf.AttemptedGateway, rf.ActualGateway,
 		rf.Attempts, string(failureReason), rf.InitiatedAt, rf.ResolvedAt, rf.Version,
@@ -47,7 +54,12 @@ func (r *RefundRepository) Insert(ctx context.Context, rf *refund.Refund) error 
 }
 
 func (r *RefundRepository) GetByID(ctx context.Context, id uuid.UUID) (*refund.Refund, error) {
-	row := queryer(ctx, r.db.pool).QueryRow(ctx, r.q.RefundGetByID, id)
+	row := queryer(ctx, r.db.pool).QueryRow(ctx, `SELECT
+    id, transaction_id, amount, reason, status,
+    initiated_by, gateway_refund_id, attempted_gateway, actual_gateway,
+    attempts, failure_reason, initiated_at, resolved_at, version
+FROM refunds
+WHERE id = $1`, id)
 	return scanRefund(row)
 }
 
@@ -58,7 +70,10 @@ func (r *RefundRepository) SumActiveRefunds(ctx context.Context, transactionID u
 	}
 
 	var sum int64
-	err = tx.QueryRow(ctx, r.q.RefundSumActive, transactionID).Scan(&sum)
+	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0)
+FROM refunds
+WHERE transaction_id = $1
+  AND status IN ('REFUND_INITIATED', 'REFUND_PROCESSING', 'REFUNDED')`, transactionID).Scan(&sum)
 	if err != nil {
 		return 0, fmt.Errorf("refund: sum active refunds for transaction %s: %w", transactionID, err)
 	}
@@ -77,14 +92,24 @@ func (r *RefundRepository) UpdateStatus(ctx context.Context, rf *refund.Refund) 
 	}
 
 	var newVersion int
-	err = tx.QueryRow(ctx, r.q.RefundUpdateStatus,
+	err = tx.QueryRow(ctx, `UPDATE refunds SET
+    status            = $1,
+    version           = version + 1,
+    gateway_refund_id = $2,
+    actual_gateway    = $3,
+    attempts          = $4,
+    failure_reason    = $5,
+    resolved_at       = $6
+WHERE id = $7
+  AND version = $8
+RETURNING version`,
 		rf.Status, rf.GatewayRefundID, rf.ActualGateway,
 		rf.Attempts, string(failureReason), rf.ResolvedAt,
 		rf.ID, rf.Version,
 	).Scan(&newVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
-		if e := tx.QueryRow(ctx, r.q.RefundExists, rf.ID).Scan(&exists); e != nil {
+		if e := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM refunds WHERE id = $1)`, rf.ID).Scan(&exists); e != nil {
 			return fmt.Errorf("refund: disambiguate update %s: %w", rf.ID, e)
 		}
 		if !exists {
@@ -101,7 +126,9 @@ func (r *RefundRepository) UpdateStatus(ctx context.Context, rf *refund.Refund) 
 
 func (r *RefundRepository) ExistsByReason(ctx context.Context, transactionID uuid.UUID, reason string) (bool, error) {
 	var exists bool
-	err := queryer(ctx, r.db.pool).QueryRow(ctx, r.q.RefundExistsByReason, transactionID, reason).Scan(&exists)
+	err := queryer(ctx, r.db.pool).QueryRow(ctx, `SELECT EXISTS(
+    SELECT 1 FROM refunds WHERE transaction_id = $1 AND reason = $2
+)`, transactionID, reason).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("refund: exists by reason %s/%s: %w", transactionID, reason, err)
 	}
@@ -115,7 +142,9 @@ func (r *RefundRepository) LockParentTransaction(ctx context.Context, transactio
 	}
 
 	var id uuid.UUID
-	err = tx.QueryRow(ctx, r.q.RefundLockParent, transactionID).Scan(&id)
+	err = tx.QueryRow(ctx, `SELECT id FROM transactions
+WHERE id = $1
+FOR UPDATE`, transactionID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}

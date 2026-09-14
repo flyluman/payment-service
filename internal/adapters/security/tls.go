@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 const certExpiryWarnWindow = 14 * 24 * time.Hour

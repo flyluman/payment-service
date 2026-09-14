@@ -53,9 +53,10 @@ type MethodDetails struct {
 	Wallet     *WalletDetails     `json:"wallet,omitempty"`
 }
 
-type Transaction struct {
+type Txn struct {
 	ID                      uuid.UUID
-	MerchantID              uuid.UUID
+	TenantID                uuid.UUID
+	UserID                  uuid.UUID
 	Amount                  int64
 	Currency                string
 	PaymentMethod           PaymentMethod
@@ -80,6 +81,12 @@ type Transaction struct {
 	CancelRequestedVia      CancelVia
 	ProcessingStartedAt     *time.Time
 	ProcessingTimeout       *time.Duration
+	CallbackURL             string
+	RedirectURL             string
+	TokenHash               string
+	GatewayFeeEstimate      *int64
+	GatewayFeeCurrency      string
+	GatewayFeeModelVersion  int
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 }
@@ -103,7 +110,7 @@ const (
 
 const (
 	ActorSystem   Actor = "system"
-	ActorMerchant Actor = "merchant"
+	ActorTenant Actor = "tenant"
 	ActorOps      Actor = "ops"
 	ActorGateway  Actor = "gateway"
 )
@@ -136,7 +143,8 @@ func (s Status) IsTerminal() bool {
 }
 
 func New(
-	merchantID uuid.UUID,
+	tenantID uuid.UUID,
+	userID uuid.UUID,
 	amount int64,
 	currency string,
 	method PaymentMethod,
@@ -146,7 +154,7 @@ func New(
 	description string,
 	metadata map[string]any,
 	estimatedTimeoutSec int,
-) (*Transaction, error) {
+) (*Txn, error) {
 	if amount <= 0 {
 		return nil, fmt.Errorf("amount must be positive, got %d", amount)
 	}
@@ -156,8 +164,8 @@ func New(
 	if _, ok := validPaymentMethods[method]; !ok {
 		return nil, fmt.Errorf("invalid payment method %q", method)
 	}
-	if merchantID == uuid.Nil {
-		return nil, fmt.Errorf("merchantID must not be nil")
+	if tenantID == uuid.Nil {
+		return nil, fmt.Errorf("tenantID must not be nil")
 	}
 	if gatewayID == "" {
 		return nil, fmt.Errorf("gatewayID must not be empty")
@@ -167,9 +175,10 @@ func New(
 	}
 
 	now := time.Now().UTC()
-	return &Transaction{
-		ID:                      uuid.New(),
-		MerchantID:              merchantID,
+	return &Txn{
+		ID:                      uuid.Must(uuid.NewV7()),
+		TenantID:                tenantID,
+		UserID:                  userID,
 		Amount:                  amount,
 		Currency:                currency,
 		PaymentMethod:           method,
@@ -186,7 +195,7 @@ func New(
 	}, nil
 }
 
-func (t *Transaction) SetCancelIntent(by Actor, via CancelVia) {
+func (t *Txn) SetCancelIntent(by Actor, via CancelVia) {
 	now := time.Now().UTC()
 	t.CancelIntent = true
 	t.CancelRequestedBy = by
@@ -195,7 +204,7 @@ func (t *Transaction) SetCancelIntent(by Actor, via CancelVia) {
 	t.UpdatedAt = now
 }
 
-func (t *Transaction) IsLeaseExpired() bool {
+func (t *Txn) IsLeaseExpired() bool {
 	if t.Status != StatusProcessing {
 		return false
 	}
@@ -205,16 +214,19 @@ func (t *Transaction) IsLeaseExpired() bool {
 	return time.Now().UTC().After(t.ProcessingStartedAt.Add(*t.ProcessingTimeout))
 }
 
-func (t *Transaction) HasGatewayDiscrepancy() bool {
+func (t *Txn) HasGatewayDiscrepancy() bool {
 	return t.ActualGateway != "" && t.AttemptedGateway != t.ActualGateway
 }
 
-func (t *Transaction) Validate() error {
+func (t *Txn) Validate() error {
 	if t.ID == uuid.Nil {
 		return fmt.Errorf("transaction ID must not be nil")
 	}
-	if t.MerchantID == uuid.Nil {
-		return fmt.Errorf("merchantID must not be nil")
+	if t.TenantID == uuid.Nil {
+		return fmt.Errorf("tenantID must not be nil")
+	}
+	if t.UserID == uuid.Nil {
+		return fmt.Errorf("userID must not be nil")
 	}
 	if t.Amount <= 0 {
 		return fmt.Errorf("amount must be positive, got %d", t.Amount)

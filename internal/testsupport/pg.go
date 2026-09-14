@@ -13,13 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"samarth/payment-service/config"
-	"samarth/payment-service/internal/adapters/postgres"
+	"github.com/crownroutes/payment-service/config"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 )
 
 type PG struct {
 	DB *postgres.DB
-	Q  *postgres.Queries
 }
 
 var (
@@ -32,7 +31,7 @@ func RequirePostgres(t *testing.T) *PG {
 	t.Helper()
 	pgOnce.Do(func() { sharedPG, pgErr = setupPostgres() })
 	if pgErr != nil {
-		t.Skipf("integration postgres unavailable: %v\n  start it with: docker compose -f deploy/docker/docker-compose.test.yml up -d", pgErr)
+		t.Skipf("integration postgres unavailable: %v\n  start it with: docker compose up -d postgres valkey", pgErr)
 	}
 	return sharedPG
 }
@@ -46,7 +45,9 @@ func (p *PG) Truncate(t *testing.T, tables ...string) {
 		}
 	}
 	sql := "TRUNCATE " + strings.Join(tables, ", ") + " CASCADE"
-	if _, err := p.DB.Pool().Exec(context.Background(), sql); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := p.DB.Pool().Exec(ctx, sql); err != nil {
 		t.Fatalf("testsupport: truncate %v: %v", tables, err)
 	}
 }
@@ -65,11 +66,7 @@ func setupPostgres() (*PG, error) {
 	if err := applyMigrations(ctx, db); err != nil {
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
-	q, err := postgres.LoadQueries()
-	if err != nil {
-		return nil, err
-	}
-	return &PG{DB: db, Q: q}, nil
+	return &PG{DB: db}, nil
 }
 
 func dbConfigFromEnv() config.DatabaseConfig {
@@ -142,10 +139,18 @@ func getEnv(key, def string) string {
 	return def
 }
 
-// AllShards returns the full shard range [0, 64) for tests that poll the whole
+// AllShards returns the full shard range [0, n) for tests that poll the whole
 // outbox without partitioning across relay workers.
 func AllShards() []int {
-	shards := make([]int, 64)
+	return ShardRange(64)
+}
+
+// ShardRange returns [0, n) for use in outbox polling.
+func ShardRange(n int) []int {
+	if n < 1 {
+		n = 1
+	}
+	shards := make([]int, n)
 	for i := range shards {
 		shards[i] = i
 	}

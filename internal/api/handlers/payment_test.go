@@ -11,161 +11,176 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/app/idempotency"
-	"samarth/payment-service/internal/app/payment"
-	"samarth/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/api/middleware"
+	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	"github.com/crownroutes/payment-service/internal/app/payment"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type fakeService struct {
-	created   *transaction.Transaction
-	verdict   idempotency.Verdict
-	processed *transaction.Transaction
-	fetched   *transaction.Transaction
-	createErr error
-	procErr   error
-	getErr    error
+	created      *transaction.Txn
+	verdict      idempotency.Verdict
+	processed    *transaction.Txn
+	fetched      *transaction.Txn
+	createErr    error
+	procErr      error
+	getErr       error
+	token        string
 }
 
-func (f *fakeService) CreatePayment(ctx context.Context, in payment.CreatePaymentInput) (payment.CreateResult, error) {
+func (f *fakeService) Create(ctx context.Context, in payment.CreateInput) (payment.CreateResult, error) {
 	if f.createErr != nil {
 		return payment.CreateResult{}, f.createErr
 	}
-	return payment.CreateResult{Verdict: f.verdict, Transaction: f.created}, nil
+	return payment.CreateResult{Verdict: f.verdict, Transaction: f.created, Token: f.token}, nil
 }
-func (f *fakeService) ProcessPayment(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error) {
+func (f *fakeService) ProcessPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	return f.processed, f.procErr
 }
-func (f *fakeService) GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Transaction, error) {
+func (f *fakeService) GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	return f.fetched, f.getErr
 }
+func (f *fakeService) GetGatewayMetadata(ctx context.Context, id uuid.UUID) (map[string]any, error) {
+	return nil, nil
+}
+func (f *fakeService) ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
+	return &ports.TransactionListResult{}, nil
+}
 
-func sampleTxn(status transaction.Status) *transaction.Transaction {
-	t, _ := transaction.New(uuid.New(), 150000, "INR", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order", nil, 30)
+func sampleTxn(status transaction.Status) *transaction.Txn {
+	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order", nil, 30)
 	t.Status = status
 	return t
 }
 
-func validBody() string {
-	return `{"merchant_id":"` + uuid.NewString() + `","amount":150000,"currency":"INR","payment_method":"card","merchant_tier":"standard","is_domestic":true}`
-}
-
-func doRequest(h *PaymentHandler, method, target, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, target, strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	switch {
-	case method == http.MethodPost:
-		req.Header.Set("Idempotency-Key", "test-key")
-		h.Create(rec, req)
-	default:
-		h.Get(rec, req)
-	}
-	return rec
+func validCreateBody() string {
+	return `{
+		"gateway_id": "stripe",
+		"amount": 1000,
+		"currency": "BDT",
+		"payment_method": "card",
+		"callback_url": "https://example.com/callback",
+		"redirect_url": "https://example.com/redirect"
+	}`
 }
 
 func TestCreate_Success(t *testing.T) {
-	created := sampleTxn(transaction.StatusPending)
-	processed := sampleTxn(transaction.StatusSucceeded)
-	processed.ID = created.ID
-	processed.GatewayReferenceID = "pi_1"
+	txn := sampleTxn(transaction.StatusPending)
+	h := NewPaymentHandler(&fakeService{created: txn, verdict: idempotency.Created, token: "test-token"})
 
-	h := NewPaymentHandler(&fakeService{created: created, processed: processed})
-	rec := doRequest(h, http.MethodPost, "/payments", validBody())
+	body := validCreateBody()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", strings.NewReader(body))
+	req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), middleware.Principal{TenantID: txn.TenantID.String(), UserID: uuid.NewString()}))
+	req.Header.Set("Idempotency-Key", "test-idem-key")
+	rec := httptest.NewRecorder()
+	h.Create(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	var resp paymentResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+	var env struct {
+		Data createPaymentResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != string(transaction.StatusSucceeded) {
-		t.Errorf("expected SUCCEEDED, got %s", resp.Status)
+	if env.Data.TransactionID == "" {
+		t.Fatal("expected transaction_id")
 	}
-	if resp.GatewayReferenceID != "pi_1" {
-		t.Errorf("expected gateway reference in response, got %q", resp.GatewayReferenceID)
-	}
-}
-
-func TestCreate_NoGatewayReturns422(t *testing.T) {
-	h := NewPaymentHandler(&fakeService{createErr: payment.ErrNoGateway})
-	rec := doRequest(h, http.MethodPost, "/payments", validBody())
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", rec.Code)
+	if env.Data.Token == "" {
+		t.Fatal("expected token")
 	}
 }
 
-func TestCreate_MissingIdempotencyKey400(t *testing.T) {
-	h := NewPaymentHandler(&fakeService{created: sampleTxn(transaction.StatusPending)})
-	req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(validBody()))
-	rec := httptest.NewRecorder()
-	h.Create(rec, req) // no Idempotency-Key header
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 without Idempotency-Key, got %d", rec.Code)
-	}
-}
-
-func TestCreate_ReplayedReturns200(t *testing.T) {
-	replayed := sampleTxn(transaction.StatusSucceeded)
-	h := NewPaymentHandler(&fakeService{created: replayed, verdict: idempotency.Replayed})
-	rec := doRequest(h, http.MethodPost, "/payments", validBody())
-	if rec.Code != http.StatusOK {
-		t.Fatalf("a replayed idempotent create should be 200, got %d", rec.Code)
-	}
-}
-
-func TestCreate_InProgressReturns409(t *testing.T) {
-	h := NewPaymentHandler(&fakeService{verdict: idempotency.InProgress})
-	rec := doRequest(h, http.MethodPost, "/payments", validBody())
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("an in-progress idempotent create should be 409, got %d", rec.Code)
-	}
-}
-
-func TestCreate_KeyReusedReturns409(t *testing.T) {
-	h := NewPaymentHandler(&fakeService{verdict: idempotency.KeyReused})
-	rec := doRequest(h, http.MethodPost, "/payments", validBody())
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("a reused idempotency key should be 409, got %d", rec.Code)
-	}
-}
-
-func TestCreate_InvalidJSON(t *testing.T) {
+func TestCreate_MissingFields(t *testing.T) {
 	h := NewPaymentHandler(&fakeService{})
-	rec := doRequest(h, http.MethodPost, "/payments", "{not json")
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"empty body", `{}`},
+		{"missing gateway_id", `{"amount":1000,"currency":"BDT","payment_method":"card"}`},
+		{"zero amount", `{"gateway_id":"stripe","amount":0,"currency":"BDT","payment_method":"card"}`},
+		{"missing currency", `{"gateway_id":"stripe","amount":1000,"payment_method":"card"}`},
+		{"missing callback_url", `{"gateway_id":"stripe","amount":1000,"currency":"BDT","payment_method":"card","redirect_url":"https://e.com/r"}`},
+		{"missing redirect_url", `{"gateway_id":"stripe","amount":1000,"currency":"BDT","payment_method":"card","callback_url":"https://e.com/c"}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", strings.NewReader(tc.body))
+			req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), middleware.Principal{TenantID: uuid.NewString()}))
+			req.Header.Set("Idempotency-Key", "test-idem-key")
+			rec := httptest.NewRecorder()
+			h.Create(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreate_MissingTenant(t *testing.T) {
+	h := NewPaymentHandler(&fakeService{})
+	body := validCreateBody()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "test-idem-key")
+	rec := httptest.NewRecorder()
+	h.Create(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestCreate_MissingIdempotencyKey(t *testing.T) {
+	h := NewPaymentHandler(&fakeService{})
+	body := validCreateBody()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", strings.NewReader(body))
+	req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), middleware.Principal{TenantID: uuid.NewString()}))
+	rec := httptest.NewRecorder()
+	h.Create(rec, req)
+
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rec.Code)
 	}
 }
 
-func TestCreate_ValidationErrors(t *testing.T) {
-	h := NewPaymentHandler(&fakeService{})
-	cases := []string{
-		`{"merchant_id":"not-a-uuid","amount":100,"currency":"INR","payment_method":"card"}`,
-		`{"merchant_id":"` + uuid.NewString() + `","amount":0,"currency":"INR","payment_method":"card"}`,
-		`{"merchant_id":"` + uuid.NewString() + `","amount":100,"payment_method":"card"}`,
-	}
-	for _, body := range cases {
-		rec := doRequest(h, http.MethodPost, "/payments", body)
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("expected 400 for %q, got %d", body, rec.Code)
-		}
+func TestCreate_NoGateway(t *testing.T) {
+	h := NewPaymentHandler(&fakeService{createErr: payment.ErrNoGateway})
+	body := validCreateBody()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", strings.NewReader(body))
+	req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), middleware.Principal{TenantID: uuid.NewString()}))
+	req.Header.Set("Idempotency-Key", "test-idem-key")
+	rec := httptest.NewRecorder()
+	h.Create(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", rec.Code)
 	}
 }
 
-func TestCreate_ProcessFailureReturns202(t *testing.T) {
-	created := sampleTxn(transaction.StatusPending)
-	h := NewPaymentHandler(&fakeService{created: created, procErr: errors.New("gateway down")})
-	rec := doRequest(h, http.MethodPost, "/payments", validBody())
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 when processing fails after create, got %d", rec.Code)
+func TestCreate_IdempotencyConflict(t *testing.T) {
+	h := NewPaymentHandler(&fakeService{verdict: idempotency.KeyReused})
+	body := validCreateBody()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", strings.NewReader(body))
+	req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), middleware.Principal{TenantID: uuid.NewString()}))
+	req.Header.Set("Idempotency-Key", "test-idem-key")
+	rec := httptest.NewRecorder()
+	h.Create(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rec.Code)
 	}
 }
 
 func TestGet_Success(t *testing.T) {
 	txn := sampleTxn(transaction.StatusSucceeded)
 	h := NewPaymentHandler(&fakeService{fetched: txn})
-	req := httptest.NewRequest(http.MethodGet, "/payments/"+txn.ID.String(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/payments/"+txn.ID.String(), nil)
 	req.SetPathValue("id", txn.ID.String())
+	req = req.WithContext(middleware.ContextWithPrincipal(req.Context(), middleware.Principal{TenantID: txn.TenantID.String()}))
 	rec := httptest.NewRecorder()
 	h.Get(rec, req)
 
@@ -176,7 +191,7 @@ func TestGet_Success(t *testing.T) {
 
 func TestGet_InvalidID(t *testing.T) {
 	h := NewPaymentHandler(&fakeService{})
-	req := httptest.NewRequest(http.MethodGet, "/payments/bad", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/payments/bad", nil)
 	req.SetPathValue("id", "bad")
 	rec := httptest.NewRecorder()
 	h.Get(rec, req)
@@ -188,7 +203,7 @@ func TestGet_InvalidID(t *testing.T) {
 func TestGet_NotFound(t *testing.T) {
 	h := NewPaymentHandler(&fakeService{getErr: errors.New("not found")})
 	id := uuid.NewString()
-	req := httptest.NewRequest(http.MethodGet, "/payments/"+id, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/payments/"+id, nil)
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
 	h.Get(rec, req)

@@ -1,25 +1,16 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
+
+	"github.com/crownroutes/payment-service/internal/api/middleware"
+	"github.com/crownroutes/payment-service/internal/api/response"
 )
 
-type errorResponse struct {
-	Error errorBody `json:"error"`
+func writeJSON(w http.ResponseWriter, r *http.Request, status int, body any) {
+	response.WriteJSON(w, status, body, middleware.RequestIDFromContext(r.Context()))
 }
 
-type errorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, errorResponse{Error: errorBody{Code: code, Message: message}})
+func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	response.WriteError(w, status, code, message, middleware.RequestIDFromContext(r.Context()))
 }

@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Payment Service — Gateway Management</title>
+<style>
+:root{--bg:#0f1117;--surface:#1a1d27;--border:#2a2d3a;--text:#e2e4eb;--muted:#8b8fa3;--primary:#6366f1;--primary-hover:#818cf8;--danger:#ef4444;--danger-hover:#f87171;--success:#22c55e;--warning:#f59e0b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;padding:clamp(16px,4vw,32px)}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:1.5rem;font-weight:600;margin-bottom:.25rem}
+.subtitle{color:var(--muted);font-size:.875rem;margin-bottom:clamp(16px,3vw,24px)}
+.tenant-bar{display:flex;gap:.75rem;align-items:end;margin-bottom:1.5rem;flex-wrap:wrap}
+.field{display:flex;flex-direction:column;gap:.25rem;flex:1;min-width:200px}
+.field label{font-size:.75rem;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.field input,.field select,.field textarea{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.5rem .75rem;color:var(--text);font-size:.875rem;outline:none;transition:border-color .15s}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--primary)}
+.btn{display:inline-flex;align-items:center;gap:.375rem;padding:.5rem 1rem;border-radius:6px;font-size:.8125rem;font-weight:500;border:none;cursor:pointer;transition:background .15s;white-space:nowrap}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:hover{background:var(--primary-hover)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-danger{background:transparent;color:var(--danger);border:1px solid var(--danger)}
+.btn-danger:hover{background:var(--danger);color:#fff}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.btn-ghost:hover{background:var(--surface);color:var(--text)}
+.btn-sm{padding:.25rem .625rem;font-size:.75rem}
+.table-wrap{border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:1.5rem;overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:500px}
+th{text-align:left;font-size:.6875rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;background:var(--surface);padding:.625rem 1rem}
+td{padding:.75rem 1rem;border-top:1px solid var(--border);font-size:.8125rem}
+tr:hover td{background:rgba(99,102,241,.04)}
+.badge{display:inline-block;padding:.125rem .5rem;border-radius:9999px;font-size:.6875rem;font-weight:600}
+.badge-active{background:rgba(34,197,94,.15);color:var(--success)}
+.badge-inactive{background:rgba(139,143,163,.15);color:var(--muted)}
+.badge-provider{background:rgba(99,102,241,.15);color:var(--primary-hover)}
+.actions{display:flex;gap:.375rem;flex-wrap:wrap}
+.empty-state{padding:3rem;text-align:center;color:var(--muted)}
+.panel-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;display:flex;align-items:center;justify-content:center;padding:clamp(12px,4vw,40px)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:clamp(16px,3vw,24px);width:100%;max-width:480px;max-height:90vh;overflow-y:auto;animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.panel h2{font-size:1.125rem;margin-bottom:1rem}
+.panel .field{margin-bottom:.75rem}
+.panel textarea{min-height:120px;font-family:'SF Mono','Fira Code',monospace;font-size:.8125rem;resize:vertical}
+.panel-actions{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
+.error-msg{color:var(--danger);font-size:.75rem;margin-top:.5rem}
+.hint{color:var(--muted);font-size:.75rem;margin-top:.25rem}
+.loading-dots:after{content:'.';animation:dots 1.5s steps(4,end) infinite}
+@keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Gateway Management</h1>
+<p class="subtitle">Manage per-tenant payment gateway configurations</p>
+
+<div class="tenant-bar">
+<div class="field" style="flex:2">
+<label>Tenant ID</label>
+<input type="text" id="tenantId" placeholder="e.g. 550e8400-e29b-41d4-a716-446655440000">
+</div>
+<button id="loadBtn" class="btn btn-primary">Load Gateways</button>
+</div>
+
+<div id="tableArea" class="hidden">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem;flex-wrap:wrap;gap:.5rem">
+<span id="gatewayCount" style="font-size:.8125rem;color:var(--muted)"></span>
+<button id="addBtn" class="btn btn-primary btn-sm">+ Add Gateway</button>
+</div>
+<div id="emptyState" class="empty-state hidden">
+<p>No gateway configurations for this tenant.</p>
+<button id="addFromEmptyBtn" class="btn btn-ghost" style="margin-top:.75rem">Add first gateway</button>
+</div>
+<div id="tableWrap" class="table-wrap hidden">
+<table>
+<thead><tr>
+<th>Gateway</th><th>Provider</th><th>Status</th><th>Version</th><th>Updated</th><th></th>
+</tr></thead>
+<tbody id="tableBody"></tbody>
+</table>
+</div>
+</div>
+
+<div id="errorArea" class="hidden" style="margin-top:.5rem">
+<p id="errorText" class="error-msg"></p>
+</div>
+
+<div id="formOverlay" class="panel-overlay hidden">
+<div class="panel">
+<h2 id="formTitle">Add Gateway</h2>
+
+<div class="field">
+<label>Gateway ID</label>
+<input type="text" id="formGatewayId" placeholder="e.g. stripe_live, razorpay_prod">
+</div>
+
+<div class="field">
+<label>Provider</label>
+<select id="formProvider">
+<option value="">Select provider...</option>
+<option value="stripe">Stripe</option>
+<option value="razorpay">Razorpay</option>
+<option value="fib">FIB</option>
+</select>
+</div>
+
+<div id="stripeFields" class="provider-fields hidden">
+<div class="field"><label>API Key</label><input type="text" id="formStripeApiKey" placeholder="sk_live_..."></div>
+<div class="field"><label>Publishable Key</label><input type="text" id="formStripePubKey" placeholder="pk_live_..."></div>
+<div class="field"><label>Webhook Secret <span style="color:var(--muted)">(optional)</span></label><input type="text" id="formStripeWebhook" placeholder="whsec_..."></div>
+</div>
+
+<div id="razorpayFields" class="provider-fields hidden">
+<div class="field"><label>Key ID</label><input type="text" id="formRazorpayKeyId" placeholder="rzp_live_..."></div>
+<div class="field"><label>Key Secret</label><input type="text" id="formRazorpaySecret" placeholder="Enter secret"></div>
+<div class="field"><label>Publishable Key</label><input type="text" id="formRazorpayPubKey" placeholder="rzp_live_..."></div>
+</div>
+
+<div id="fibFields" class="provider-fields hidden">
+<div class="field"><label>Client ID</label><input type="text" id="formFibClientId" placeholder="FIB client ID"></div>
+<div class="field"><label>Client Secret</label><input type="text" id="formFibClientSecret" placeholder="Enter secret"></div>
+<div class="field"><label>Base URL</label><input type="text" id="formFibBaseUrl" placeholder="https://api.fib.com/..."></div>
+<div class="field"><label>Callback URL <span style="color:var(--muted)">(optional)</span></label><input type="text" id="formFibCallbackUrl" placeholder="https://yourdomain.com/webhooks/gateway/fib"></div>
+</div>
+
+<div class="field">
+<label><input type="checkbox" id="formIsActive" checked style="margin-right:.375rem"> Active</label>
+</div>
+
+<div id="formError" class="error-msg hidden"></div>
+
+<div class="panel-actions">
+<button id="cancelBtn" class="btn btn-ghost">Cancel</button>
+<button id="saveBtn" class="btn btn-primary">Save</button>
+</div>
+</div>
+</div>
+</div>
+
+<script>
+(function(){
+var $=function(id){return document.getElementById(id)};
+
+var state={
+tenantId:'',
+gateways:[],
+loaded:false,
+loading:false,
+error:null,
+editing:false,
+submitting:false,
+formGatewayId:'',
+formProvider:'',
+formIsActive:true
+};
+
+function show(id){var e=$(id);if(e)e.classList.remove('hidden')}
+function hide(id){var e=$(id);if(e)e.classList.add('hidden')}
+
+function getFormData(){
+var cfg={};
+var p=state.formProvider;
+if(p==='stripe'){
+var ak=$('formStripeApiKey').value.trim();
+if(ak)cfg.api_key=ak;
+var pk=$('formStripePubKey').value.trim();
+if(pk)cfg.publishable_key=pk;
+var ws=$('formStripeWebhook').value.trim();
+if(ws)cfg.webhook_secret=ws;
+}else if(p==='razorpay'){
+var ki=$('formRazorpayKeyId').value.trim();
+if(ki)cfg.key_id=ki;
+var ks=$('formRazorpaySecret').value.trim();
+if(ks)cfg.key_secret=ks;
+var pk_r=$('formRazorpayPubKey').value.trim();
+if(pk_r)cfg.publishable_key=pk_r;
+}else if(p==='fib'){
+var ci=$('formFibClientId').value.trim();
+if(ci)cfg.client_id=ci;
+var cs=$('formFibClientSecret').value.trim();
+if(cs)cfg.client_secret=cs;
+var bu=$('formFibBaseUrl').value.trim();
+if(bu)cfg.base_url=bu;
+var cu=$('formFibCallbackUrl').value.trim();
+if(cu)cfg.callback_url=cu;
+}
+return cfg;
+}
+
+function setFormData(cfg){
+if(!cfg)return;
+if(state.formProvider==='stripe'){
+$('formStripeApiKey').value=cfg.api_key||'';
+$('formStripePubKey').value=cfg.publishable_key||'';
+$('formStripeWebhook').value=cfg.webhook_secret||'';
+}else if(state.formProvider==='razorpay'){
+$('formRazorpayKeyId').value=cfg.key_id||'';
+$('formRazorpaySecret').value=cfg.key_secret||'';
+$('formRazorpayPubKey').value=cfg.publishable_key||'';
+}else if(state.formProvider==='fib'){
+$('formFibClientId').value=cfg.client_id||'';
+$('formFibClientSecret').value=cfg.client_secret||'';
+$('formFibBaseUrl').value=cfg.base_url||'';
+$('formFibCallbackUrl').value=cfg.callback_url||'';
+}
+}
+
+function showProviderFields(provider){
+['stripeFields','razorpayFields','fibFields'].forEach(function(id){hide(id)});
+if(provider==='stripe')show('stripeFields');
+else if(provider==='razorpay')show('razorpayFields');
+else if(provider==='fib')show('fibFields');
+}
+
+function clearForm(){
+$('formGatewayId').value='';
+$('formProvider').value='';
+$('formStripeApiKey').value='';
+$('formStripePubKey').value='';
+$('formStripeWebhook').value='';
+$('formRazorpayKeyId').value='';
+$('formRazorpaySecret').value='';
+$('formRazorpayPubKey').value='';
+$('formFibClientId').value='';
+$('formFibClientSecret').value='';
+$('formFibBaseUrl').value='';
+$('formFibCallbackUrl').value='';
+$('formIsActive').checked=true;
+state.formGatewayId='';
+state.formProvider='';
+state.formIsActive=true;
+hide('formError');
+showProviderFields('');
+}
+
+function renderTable(){
+if(!state.loaded){hide('tableArea');return}
+show('tableArea');
+$('gatewayCount').textContent=state.gateways.length+' gateway(s) configured';
+if(state.gateways.length===0){
+show('emptyState');
+hide('tableWrap');
+return;
+}
+hide('emptyState');
+show('tableWrap');
+var tbody=$('tableBody');
+tbody.innerHTML='';
+state.gateways.forEach(function(gw){
+var tr=document.createElement('tr');
+var active=gw.is_active;
+tr.innerHTML=
+'<td style="font-weight:500">'+escape(gw.gateway_id)+'</td>'+
+'<td><span class="badge badge-provider">'+escape(gw.provider)+'</span></td>'+
+'<td><span class="badge '+(active?'badge-active':'badge-inactive')+'">'+(active?'Active':'Inactive')+'</span></td>'+
+'<td style="color:var(--muted)">v'+gw.config_version+'</td>'+
+'<td style="color:var(--muted);font-size:.75rem">'+escape(gw.updated_at||'')+'</td>'+
+'<td><div class="actions">'+
+'<button class="btn btn-ghost btn-sm toggle-btn">'+(active?'Deactivate':'Activate')+'</button>'+
+'<button class="btn btn-ghost btn-sm edit-btn">Edit</button>'+
+'<button class="btn btn-danger btn-sm delete-btn">Delete</button>'+
+'</div></td>';
+tr.querySelector('.toggle-btn').addEventListener('click',function(){toggleActive(gw)});
+tr.querySelector('.edit-btn').addEventListener('click',function(){openEdit(gw)});
+tr.querySelector('.delete-btn').addEventListener('click',function(){deleteGateway(gw)});
+tbody.appendChild(tr);
+});
+}
+
+function renderError(){
+if(state.error){
+show('errorArea');
+$('errorText').textContent=state.error;
+}else{
+hide('errorArea');
+}
+}
+
+function escape(s){
+if(typeof s!=='string')return s||'';
+var d=document.createElement('div');
+d.appendChild(document.createTextNode(s));
+return d.innerHTML;
+}
+
+async function loadGateways(){
+var tid=$('tenantId').value.trim();
+if(!tid)return;
+state.tenantId=tid;
+state.loading=true;
+state.error=null;
+$('loadBtn').disabled=true;
+$('loadBtn').textContent='Loading...';
+localStorage.setItem('ps_tenant_id',tid);
+try{
+var r=await fetch('/api/v1/tenants/'+encodeURIComponent(tid)+'/gateways');
+if(!r.ok){
+var b=await r.json().catch(function(){return{}});
+throw new Error(b.error?.message||'HTTP '+r.status);
+}
+state.gateways=await r.json();
+state.loaded=true;
+renderTable();
+renderError();
+}catch(e){
+state.error=e.message;
+state.gateways=[];
+state.loaded=true;
+renderTable();
+renderError();
+}finally{
+state.loading=false;
+$('loadBtn').disabled=false;
+$('loadBtn').textContent='Load Gateways';
+}
+}
+
+function openAdd(){
+state.editing=false;
+clearForm();
+$('formTitle').textContent='Add Gateway';
+show('formOverlay');
+}
+
+function openEdit(gw){
+state.editing=true;
+clearForm();
+$('formTitle').textContent='Edit Gateway';
+$('formGatewayId').value=gw.gateway_id;
+$('formGatewayId').disabled=true;
+state.formGatewayId=gw.gateway_id;
+$('formProvider').value=gw.provider;
+state.formProvider=gw.provider;
+$('formIsActive').checked=gw.is_active;
+state.formIsActive=gw.is_active;
+showProviderFields(gw.provider);
+if(gw.config){
+try{setFormData(JSON.parse(gw.config))}catch(e){}
+}
+show('formOverlay');
+}
+
+function closeForm(){
+hide('formOverlay');
+$('formGatewayId').disabled=false;
+}
+
+async function onSave(){
+if(state.submitting)return;
+var gid=$('formGatewayId').value.trim();
+var prov=$('formProvider').value;
+if(!gid){show('formError');$('formError').textContent='Gateway ID is required';return}
+if(!prov){show('formError');$('formError').textContent='Provider is required';return}
+var cfg=getFormData();
+if(Object.keys(cfg).length===0){show('formError');$('formError').textContent='At least one config field is required';return}
+state.submitting=true;
+$('saveBtn').disabled=true;
+$('saveBtn').textContent='Saving...';
+hide('formError');
+try{
+var body={
+gateway_id:gid,
+provider:prov,
+config:cfg,
+is_active:$('formIsActive').checked
+};
+var r=await fetch('/api/v1/tenants/'+encodeURIComponent(state.tenantId)+'/gateways',{
+method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify(body)
+});
+if(!r.ok){
+var b=await r.json().catch(function(){return{}});
+throw new Error(b.error?.message||'HTTP '+r.status);
+}
+closeForm();
+await loadGateways();
+}catch(e){
+show('formError');
+$('formError').textContent=e.message;
+}finally{
+state.submitting=false;
+$('saveBtn').disabled=false;
+$('saveBtn').textContent=state.editing?'Save Changes':'Add Gateway';
+}
+}
+
+async function toggleActive(gw){
+try{
+var body={
+gateway_id:gw.gateway_id,
+provider:gw.provider,
+config:{},
+is_active:!gw.is_active
+};
+var r=await fetch('/api/v1/tenants/'+encodeURIComponent(state.tenantId)+'/gateways',{
+method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify(body)
+});
+if(!r.ok){
+var b=await r.json().catch(function(){return{}});
+throw new Error(b.error?.message||'HTTP '+r.status);
+}
+await loadGateways();
+}catch(e){
+state.error=e.message;
+renderError();
+}
+}
+
+async function deleteGateway(gw){
+if(!confirm('Delete gateway "'+gw.gateway_id+'" for this tenant?'))return;
+try{
+var r=await fetch('/api/v1/tenants/'+encodeURIComponent(state.tenantId)+'/gateways/'+encodeURIComponent(gw.gateway_id),{
+method:'DELETE'
+});
+if(!r.ok&&r.status!==204){
+var b=await r.json().catch(function(){return{}});
+throw new Error(b.error?.message||'HTTP '+r.status);
+}
+await loadGateways();
+}catch(e){
+state.error=e.message;
+renderError();
+}
+}
+
+$('loadBtn').addEventListener('click',loadGateways);
+$('addBtn').addEventListener('click',openAdd);
+$('addFromEmptyBtn').addEventListener('click',openAdd);
+$('cancelBtn').addEventListener('click',closeForm);
+$('saveBtn').addEventListener('click',onSave);
+$('formOverlay').addEventListener('click',function(e){if(e.target===this)closeForm()});
+$('formProvider').addEventListener('change',function(){
+state.formProvider=this.value;
+showProviderFields(this.value);
+});
+$('tenantId').addEventListener('keydown',function(e){
+if(e.key==='Enter')loadGateways();
+});
+
+var saved=localStorage.getItem('ps_tenant_id');
+if(saved){
+$('tenantId').value=saved;
+state.tenantId=saved;
+loadGateways();
+}
+})();
+</script>
+</body>
+</html>

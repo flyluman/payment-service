@@ -7,13 +7,13 @@ import (
 	"github.com/google/uuid"
 )
 
-func validNewArgs() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-	return uuid.New(), 150000, "INR", PaymentMethodCard, "razorpay", uuid.New(), "buyer@example.com", "order #42", nil, 30
+func validNewArgs() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+	return uuid.New(), uuid.New(), 150000, "BDT", PaymentMethodCard, "razorpay", uuid.New(), "buyer@example.com", "order #42", nil, 30
 }
 
 func TestNew_Valid(t *testing.T) {
-	m, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
-	tx, err := New(m, a, c, pm, g, cust, email, desc, meta, to)
+	m, _, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
+	tx, err := New(m, uuid.New(), a, c, pm, g, cust, email, desc, meta, to)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -32,34 +32,34 @@ func TestNew_Valid(t *testing.T) {
 }
 
 func TestNew_Invalid(t *testing.T) {
-	m, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
+	m, _, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
 	cases := []struct {
 		name string
-		mut  func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int)
+		mut  func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int)
 	}{
-		{"zero amount", func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, 0, c, pm, g, cust, email, desc, meta, to
+		{"zero amount", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+			return m, uuid.New(), 0, c, pm, g, cust, email, desc, meta, to
 		}},
-		{"negative amount", func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, -5, c, pm, g, cust, email, desc, meta, to
+		{"negative amount", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+			return m, uuid.New(), -5, c, pm, g, cust, email, desc, meta, to
 		}},
-		{"lowercase currency", func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, a, "inr", pm, g, cust, email, desc, meta, to
+		{"lowercase currency", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+			return m, uuid.New(), a, "bdt", pm, g, cust, email, desc, meta, to
 		}},
-		{"bad currency length", func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, a, "RUPEE", pm, g, cust, email, desc, meta, to
+		{"bad currency length", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+			return m, uuid.New(), a, "RUPEE", pm, g, cust, email, desc, meta, to
 		}},
-		{"invalid method", func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, a, c, PaymentMethod("crypto"), g, cust, email, desc, meta, to
+		{"invalid method", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+			return m, uuid.New(), a, c, PaymentMethod("crypto"), g, cust, email, desc, meta, to
 		}},
-		{"nil merchant", func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return uuid.Nil, a, c, pm, g, cust, email, desc, meta, to
+		{"nil merchant", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+			return uuid.Nil, uuid.New(), a, c, pm, g, cust, email, desc, meta, to
 		}},
-		{"empty gateway", func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, a, c, pm, "", cust, email, desc, meta, to
+		{"empty gateway", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+			return m, uuid.New(), a, c, pm, "", cust, email, desc, meta, to
 		}},
-		{"zero timeout", func() (uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, a, c, pm, g, cust, email, desc, meta, 0
+		{"zero timeout", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
+			return m, uuid.New(), a, c, pm, g, cust, email, desc, meta, 0
 		}},
 	}
 	for _, tc := range cases {
@@ -73,9 +73,7 @@ func TestNew_Invalid(t *testing.T) {
 
 func TestStatus_IsTerminal(t *testing.T) {
 	terminal := map[Status]bool{
-		StatusSucceeded: true, StatusCancelled: true, StatusRefunded: true, StatusRefundFailed: true,
-		StatusPending: false, StatusProcessing: false, StatusFailed: false,
-	}
+		StatusSucceeded: true, StatusCancelled: true, StatusRefunded: true, StatusRefundFailed: true, StatusPending: false, StatusProcessing: false, StatusFailed: false, }
 	for s, want := range terminal {
 		if s.IsTerminal() != want {
 			t.Errorf("%s.IsTerminal() = %v, want %v", s, s.IsTerminal(), want)
@@ -89,25 +87,25 @@ func TestIsLeaseExpired(t *testing.T) {
 	short := time.Second
 
 	t.Run("expired", func(t *testing.T) {
-		tx := &Transaction{Status: StatusProcessing, ProcessingStartedAt: &past, ProcessingTimeout: &short}
+		tx := &Txn{Status: StatusProcessing, ProcessingStartedAt: &past, ProcessingTimeout: &short}
 		if !tx.IsLeaseExpired() {
 			t.Error("expected lease expired")
 		}
 	})
 	t.Run("not expired", func(t *testing.T) {
-		tx := &Transaction{Status: StatusProcessing, ProcessingStartedAt: &future, ProcessingTimeout: &short}
+		tx := &Txn{Status: StatusProcessing, ProcessingStartedAt: &future, ProcessingTimeout: &short}
 		if tx.IsLeaseExpired() {
 			t.Error("expected lease not expired")
 		}
 	})
 	t.Run("not processing", func(t *testing.T) {
-		tx := &Transaction{Status: StatusPending, ProcessingStartedAt: &past, ProcessingTimeout: &short}
+		tx := &Txn{Status: StatusPending, ProcessingStartedAt: &past, ProcessingTimeout: &short}
 		if tx.IsLeaseExpired() {
 			t.Error("non-PROCESSING transaction never has expired lease")
 		}
 	})
 	t.Run("nil fields", func(t *testing.T) {
-		tx := &Transaction{Status: StatusProcessing}
+		tx := &Txn{Status: StatusProcessing}
 		if tx.IsLeaseExpired() {
 			t.Error("nil lease fields => not expired")
 		}
@@ -115,24 +113,24 @@ func TestIsLeaseExpired(t *testing.T) {
 }
 
 func TestHasGatewayDiscrepancy(t *testing.T) {
-	if (&Transaction{AttemptedGateway: "a", ActualGateway: ""}).HasGatewayDiscrepancy() {
+	if (&Txn{AttemptedGateway: "a", ActualGateway: ""}).HasGatewayDiscrepancy() {
 		t.Error("empty actual gateway => no discrepancy")
 	}
-	if (&Transaction{AttemptedGateway: "a", ActualGateway: "a"}).HasGatewayDiscrepancy() {
+	if (&Txn{AttemptedGateway: "a", ActualGateway: "a"}).HasGatewayDiscrepancy() {
 		t.Error("same gateway => no discrepancy")
 	}
-	if !(&Transaction{AttemptedGateway: "a", ActualGateway: "b"}).HasGatewayDiscrepancy() {
+	if !(&Txn{AttemptedGateway: "a", ActualGateway: "b"}).HasGatewayDiscrepancy() {
 		t.Error("different gateway => discrepancy")
 	}
 }
 
 func TestSetCancelIntent(t *testing.T) {
-	tx := &Transaction{}
-	tx.SetCancelIntent(ActorMerchant, CancelViaAPI)
+	tx := &Txn{}
+	tx.SetCancelIntent(ActorTenant, CancelViaAPI)
 	if !tx.CancelIntent {
-		t.Error("cancel intent not set")
+		t.Errorf("expected CancelIntent to be true")
 	}
-	if tx.CancelRequestedBy != ActorMerchant || tx.CancelRequestedVia != CancelViaAPI {
+	if tx.CancelRequestedBy != ActorTenant || tx.CancelRequestedVia != CancelViaAPI {
 		t.Error("cancel actor/via not recorded")
 	}
 	if tx.CancelRequestedAt == nil {
@@ -141,8 +139,8 @@ func TestSetCancelIntent(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	m, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
-	tx, _ := New(m, a, c, pm, g, cust, email, desc, meta, to)
+	m, _, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
+	tx, _ := New(m, uuid.New(), a, c, pm, g, cust, email, desc, meta, to)
 	if err := tx.Validate(); err != nil {
 		t.Fatalf("valid transaction failed validation: %v", err)
 	}

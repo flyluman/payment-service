@@ -12,8 +12,8 @@ import (
 	awssns "github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/adapters/observability"
-	"samarth/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/adapters/observability"
+	"github.com/crownroutes/payment-service/internal/ports"
 )
 
 type fakeSNS struct {
@@ -36,7 +36,7 @@ func sampleEvent() ports.PendingEvent {
 		ID:            uuid.New(),
 		AggregateID:   uuid.New(),
 		AggregateType: "transaction",
-		EventType:     ports.EventTypePaymentSucceeded,
+		EventType:     ports.EventTypeTransactionSucceeded,
 		Payload:       []byte(`{"transaction_id":"abc"}`),
 		EventVersion:  1,
 		CreatedAt:     time.Now(),

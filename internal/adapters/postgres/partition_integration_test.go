@@ -9,10 +9,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/adapters/postgres"
-	partitionmanager "samarth/payment-service/internal/jobs/partition_manager"
-	"samarth/payment-service/internal/ports"
-	"samarth/payment-service/internal/testsupport"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
+	partitionmanager "github.com/crownroutes/payment-service/internal/jobs/partition_manager"
+	"github.com/crownroutes/payment-service/internal/ports"
+	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
 type silentLogger struct{}
@@ -29,21 +29,21 @@ func TestPartitionManager_PreCreateMakesWritesLandInDatedPartition(t *testing.T)
 	pg.Truncate(t, "outbox_events")
 	ctx := context.Background()
 
-	store := postgres.NewPartitionStore(pg.DB, pg.Q)
+	store := postgres.NewPartitionStore(pg.DB)
 	mgr := partitionmanager.New(store, silentLogger{}, partitionmanager.Config{WeeksAhead: 2})
 
 	if err := mgr.RunOnce(ctx); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	outbox := postgres.NewOutboxWriter(pg.DB, pg.Q)
+	outbox := postgres.NewOutboxWriter(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 	aggID := uuid.New()
 	if err := tr.WithinTx(ctx, func(ctx context.Context) error {
 		return outbox.Write(ctx, ports.OutboxEvent{
 			AggregateID:   aggID,
 			AggregateType: "transaction",
-			EventType:     ports.EventTypePaymentCreated,
+			EventType:     ports.EventTypeTransactionCreated,
 			Payload:       []byte(`{}`),
 			EventVersion:  1,
 		})
@@ -68,7 +68,7 @@ func TestPartitionManager_DetachesStaleEmptyPartition(t *testing.T) {
 	pg.Truncate(t, "outbox_events")
 	ctx := context.Background()
 
-	store := postgres.NewPartitionStore(pg.DB, pg.Q)
+	store := postgres.NewPartitionStore(pg.DB)
 
 	// An old, empty partition well outside the retention window.
 	start := time.Date(2025, 1, 6, 0, 0, 0, 0, time.UTC) // ISO week, Monday
@@ -116,7 +116,7 @@ func TestPartitionManager_CountUnpublishedIncludesPublishing(t *testing.T) {
 	pg.Truncate(t, "outbox_events")
 	ctx := context.Background()
 
-	store := postgres.NewPartitionStore(pg.DB, pg.Q)
+	store := postgres.NewPartitionStore(pg.DB)
 
 	start := time.Date(2025, 1, 20, 0, 0, 0, 0, time.UTC) // ISO week W04, Monday
 	const name = "outbox_2025_W04"

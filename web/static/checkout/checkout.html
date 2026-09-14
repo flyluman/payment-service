@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Complete Payment</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#0f4c81,#1c75bc);min-height:100svh;display:grid;place-items:center;padding:clamp(12px,4vw,40px)}
+.card{background:#fff;width:100%;max-width:420px;border-radius:clamp(12px,2vw,18px);box-shadow:0 10px 30px rgba(0,0,0,.15);padding:clamp(20px,4vw,32px);text-align:center;animation:fadeIn .4s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.logo-title{font-size:clamp(20px,4vw,24px);font-weight:700;color:#0f4c81;margin-bottom:6px}
+.subtitle{font-size:clamp(13px,3vw,15px);color:#666;margin-bottom:clamp(16px,3vw,22px)}
+.qr-container{padding:clamp(12px,3vw,18px);background:#f4f7fb;border-radius:12px;margin-bottom:clamp(16px,3vw,22px)}
+.qr-container img{width:100%;max-width:260px;aspect-ratio:1/1;object-fit:contain}
+.payment-detail{font-size:clamp(13px,3vw,14px);color:#444;margin-bottom:clamp(18px,3vw,22px);word-break:break-word}
+.btn{display:block;width:100%;padding:clamp(12px,3vw,14px);margin-bottom:10px;border-radius:10px;text-decoration:none;font-size:clamp(14px,3vw,15px);font-weight:600;transition:background .2s ease;cursor:pointer;border:none}
+.btn-primary{background:#0f4c81;color:#fff}
+.btn-primary:hover{background:#0c3d66}
+.btn-secondary{background:#1c75bc;color:#fff}
+.btn-secondary:hover{background:#155a8c}
+.btn-outline{border:2px solid #0f4c81;color:#0f4c81;background:transparent}
+.btn-outline:hover{background:#0f4c81;color:#fff}
+.section{display:none}
+.section.active{display:block}
+.loading{text-align:center;padding:2rem 0;color:#666}
+.spinner{width:40px;height:40px;border:4px solid #e0e0e0;border-top:4px solid #0f4c81;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.status-message{padding:clamp(40px,5vw,50px);font-size:16px;line-height:1.6;text-align:center}
+.status-icon{display:block;font-size:42px;margin-bottom:14px}
+.error-msg{color:#c0392b;font-size:14px;padding:1rem 0}
+.footer-note{font-size:clamp(11px,2.5vw,12px);color:#888;margin-top:clamp(12px,3vw,16px)}
+.stripe-form{margin:clamp(16px,3vw,22px) 0;text-align:left}
+.stripe-form #card-element{border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:16px}
+.stripe-form .btn{margin-top:8px}
+.razorpay-detail{font-size:clamp(13px,3vw,14px);color:#444;margin-bottom:clamp(18px,3vw,22px)}
+.timeout-msg{font-size:14px;color:#888;margin-top:1rem}
+</style>
+</head>
+<body>
+<div class="card" id="mainCard">
+<div class="logo-title">Secure Payment</div>
+
+<div id="loadingSection" class="section active loading">
+<div class="spinner"></div>
+<p>Loading payment details...</p>
+</div>
+
+<div id="qrSection" class="section">
+<div class="subtitle">Scan the QR code to complete your payment</div>
+<div class="qr-container"><img id="qrCode" src="" alt="QR Code"></div>
+<div class="payment-detail"><strong>Reference:</strong><br><span id="readableCode"></span></div>
+<div class="payment-detail"><strong>Time Remaining:</strong><br><span id="timer">Calculating...</span></div>
+<a id="personalLink" href="#" target="_blank" class="btn btn-primary" rel="noopener">Pay with Personal App</a>
+<a id="businessLink" href="#" target="_blank" class="btn btn-secondary" rel="noopener">Pay with Business App</a>
+<a id="corporateLink" href="#" target="_blank" class="btn btn-outline" rel="noopener">Pay with Corporate App</a>
+</div>
+
+<div id="stripeSection" class="section">
+<div class="subtitle">Enter your card details</div>
+<div class="stripe-form">
+<div id="card-element"><!-- Stripe Elements mounts here --></div>
+<div id="stripeError" class="error-msg" style="display:none"></div>
+<button id="stripeSubmit" class="btn btn-primary">Pay Now</button>
+</div>
+</div>
+
+<div id="razorpaySection" class="section">
+<div class="subtitle">Pay with Razorpay</div>
+<div class="razorpay-detail">Click the button below to complete your payment.</div>
+<button id="razorpayBtn" class="btn btn-primary">Pay with Razorpay</button>
+</div>
+
+<div id="successSection" class="section status-message">
+<span class="status-icon">&#x2705;</span>
+<p>Your payment was successful!</p>
+</div>
+
+<div id="failureSection" class="section status-message">
+<span class="status-icon">&#x274C;</span>
+<p>Your payment could not be processed.</p>
+</div>
+
+<div id="timedOutSection" class="section status-message">
+<span class="status-icon">&#x23F3;</span>
+<p id="timeoutText">The payment is taking longer than expected.</p>
+<a id="reloadLink" href="#" class="btn btn-primary" style="margin-top:1rem">Reload</a>
+</div>
+
+<div id="errorSection" class="section status-message">
+<span class="status-icon">&#x26A0;</span>
+<p id="errorText" class="error-msg">Something went wrong.</p>
+<a id="reloadLink2" href="#" class="btn btn-primary" style="margin-top:1rem">Reload</a>
+</div>
+
+<div class="footer-note">Secure payment</div>
+</div>
+
+<script>
+var PAGE_DATA = {{.PageData}};
+(function(){
+var TXN_ID=PAGE_DATA.transactionId;
+var TOKEN=PAGE_DATA.token;
+var REDIRECT=PAGE_DATA.redirectUrl||'/';
+
+var SUCCESS_PAGE='/pay/success?transaction_id='+TXN_ID+'&token='+TOKEN;
+var FAILURE_PAGE='/pay/failure?transaction_id='+TXN_ID+'&token='+TOKEN;
+var STATUS_URL='/api/v1/payments/'+TXN_ID+'?token='+TOKEN;
+var EVENT_URL='/api/v1/payments/'+TXN_ID+'/events?token='+TOKEN;
+
+var $=function(id){return document.getElementById(id)};
+var TIMEOUT_MS=30000;
+var POLL_INTERVAL_MS=5000;
+
+var timerInterval=null,eventSource=null,timeoutTimer=null,pollTimer=null,receivedEvent=false;
+
+function showSection(id){
+['loadingSection','qrSection','stripeSection','razorpaySection','successSection','failureSection','timedOutSection','errorSection'].forEach(function(s){
+var el=$(s);if(el)el.className='section'+(s===id?' active':'');
+});
+}
+
+function stopAll(){
+if(timerInterval){clearInterval(timerInterval);timerInterval=null}
+if(timeoutTimer){clearTimeout(timeoutTimer);timeoutTimer=null}
+if(pollTimer){clearInterval(pollTimer);pollTimer=null}
+if(eventSource){eventSource.close();eventSource=null}
+}
+
+function startTimeout(){
+timeoutTimer=setTimeout(function(){
+if($('successSection').className.indexOf('active')===-1&&$('failureSection').className.indexOf('active')===-1){
+showSection('timedOutSection');
+}
+},TIMEOUT_MS);
+}
+
+function handleStatus(s){
+if(s==='SUCCEEDED'){
+stopAll();
+showSection('successSection');
+setTimeout(function(){if(REDIRECT)window.location.href=REDIRECT;},3000);
+return true;
+}else if(s==='FAILED'||s==='CANCELLED'){
+stopAll();
+showSection('failureSection');
+setTimeout(function(){if(REDIRECT)window.location.href=REDIRECT;},3000);
+return true;
+}
+return false;
+}
+
+function startPolling(){
+if(pollTimer)return;
+pollTimer=setInterval(function(){
+var xhr=new XMLHttpRequest();
+xhr.open('GET',STATUS_URL,true);
+xhr.onload=function(){
+if(xhr.status===200){
+try{
+var d=JSON.parse(xhr.responseText);
+if(d.data&&d.data.status)handleStatus(d.data.status);
+}catch(e){}
+}
+};
+xhr.send();
+},POLL_INTERVAL_MS);
+}
+
+function connectSSE(){
+eventSource=new EventSource(EVENT_URL);
+eventSource.addEventListener('status',function(e){
+receivedEvent=true;
+try{
+var data=JSON.parse(e.data);
+handleStatus(data.status||'');
+}catch(err){}
+});
+eventSource.addEventListener('error',function(){
+eventSource.close();
+eventSource=null;
+if(!receivedEvent){
+startPolling();
+}
+});
+eventSource.addEventListener('open',function(){
+startTimeout();
+});
+}
+
+function startTimer(vu){
+if(!vu){$('timer').textContent='--';return}
+var el=$('timer');
+function tick(){
+var diff=new Date(vu)-new Date();
+if(diff<=0){
+el.textContent='Expired';
+showSection('loadingSection');
+clearInterval(timerInterval);
+return;
+}
+var m=Math.floor((diff%3600000)/60000);
+var s=Math.floor((diff%60000)/1000);
+el.textContent=m+'m '+s+'s';
+}
+tick();
+timerInterval=setInterval(tick,1000);
+}
+
+function renderFIB(meta){
+$('qrCode').src=meta.qr_code||'';
+$('readableCode').textContent=meta.readable_code||'';
+$('personalLink').href=meta.personal_app_link||'#';
+$('businessLink').href=meta.business_app_link||'#';
+$('corporateLink').href=meta.corporate_app_link||'#';
+showSection('qrSection');
+startTimer(meta.valid_until);
+}
+
+function renderStripe(meta){
+showSection('stripeSection');
+var stripe=Stripe(meta.publishable_key);
+var elements=stripe.elements({clientSecret:meta.client_secret});
+var card=elements.create('card',{style:{
+base:{fontSize:'15px',fontFamily:'-apple-system, BlinkMacSystemFont, sans-serif',color:'#333','::placeholder':{color:'#999'}},
+invalid:{color:'#c0392b'}
+}});
+card.mount('#card-element');
+card.on('change',function(e){
+var errEl=$('stripeError');
+if(e.error){
+errEl.textContent=e.error.message;
+errEl.style.display='block';
+}else{
+errEl.style.display='none';
+}
+$('stripeSubmit').disabled=e.empty;
+});
+$('stripeSubmit').addEventListener('click',function(){
+var btn=$('stripeSubmit');
+btn.disabled=true;
+btn.textContent='Processing...';
+stripe.confirmCardPayment(meta.client_secret,{
+payment_method:{
+card:card,
+billing_details:{}
+}
+}).then(function(result){
+if(result.error){
+var errEl=$('stripeError');
+errEl.textContent=result.error.message;
+errEl.style.display='block';
+btn.disabled=false;
+btn.textContent='Pay Now';
+}else{
+showSection('loadingSection');
+}
+});
+});
+}
+
+function renderRazorpay(meta){
+showSection('razorpaySection');
+$('razorpayBtn').addEventListener('click',function(){
+var btn=$('razorpayBtn');
+btn.disabled=true;
+btn.textContent='Opening...';
+var options={
+key:meta.publishable_key||meta.key_id,
+amount:meta.amount||(PAGE_DATA.amount||0),
+currency:meta.currency||PAGE_DATA.currency||'INR',
+order_id:meta.order_id,
+handler:function(){
+showSection('loadingSection');
+},
+modal:{
+ondismiss:function(){
+btn.disabled=false;
+btn.textContent='Pay with Razorpay';
+}
+}
+};
+var rzp=new Razorpay(options);
+rzp.open();
+});
+}
+
+function renderPayment(meta){
+if(!meta){showSection('loadingSection');return;}
+
+if(meta.qr_code||meta.readable_code){
+renderFIB(meta);
+}else if(meta.client_secret&&meta.publishable_key){
+if(typeof Stripe==='undefined'){
+var script=document.createElement('script');
+script.src='https://js.stripe.com/v3/';
+script.onload=function(){renderStripe(meta);};
+document.head.appendChild(script);
+}else{
+renderStripe(meta);
+}
+}else if(meta.key_id&&meta.order_id){
+if(typeof Razorpay==='undefined'){
+var script=document.createElement('script');
+script.src='https://checkout.razorpay.com/v1/checkout.js';
+script.onload=function(){renderRazorpay(meta);};
+document.head.appendChild(script);
+}else{
+renderRazorpay(meta);
+}
+}else{
+showSection('loadingSection');
+}
+}
+
+renderPayment(PAGE_DATA.rawMetadata);
+
+if(!PAGE_DATA.rawMetadata||!(PAGE_DATA.rawMetadata.qr_code||PAGE_DATA.rawMetadata.readable_code)){
+connectSSE();
+}
+
+$('reloadLink').addEventListener('click',function(e){e.preventDefault();window.location.reload();});
+$('reloadLink2').addEventListener('click',function(e){e.preventDefault();window.location.reload();});
+})();
+</script>
+</body>
+</html>

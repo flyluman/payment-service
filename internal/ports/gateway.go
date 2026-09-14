@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 
-	"samarth/payment-service/internal/domain/transaction"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
 )
 
 var (
@@ -20,6 +19,8 @@ type GatewayWebhookEvent struct {
 	EventID            string
 	GatewayReferenceID string
 	Status             GatewayPaymentStatus
+	EventType          string
+	GatewayMetadata        map[string]any
 }
 
 type GatewayWebhookParser interface {
@@ -68,7 +69,7 @@ type GatewayCapabilities struct {
 }
 type GatewayPaymentRequest struct {
 	TransactionID  uuid.UUID
-	MerchantID     uuid.UUID
+	TenantID       uuid.UUID
 	Amount         int64
 	Currency       string
 	PaymentMethod  transaction.PaymentMethod
@@ -130,11 +131,19 @@ type GatewayPaymentResponse struct {
 	Status             GatewayPaymentStatus
 	Amount             int64
 	Currency           string
+	ClientSecret       string
 	ErrorCode          string
 	ErrorMessage       string
 	MethodResponse     GatewayMethodResponse
-	RawMetadata        map[string]any
+	GatewayMetadata    map[string]any
 	GatewayFees        int64
+	NextAction         *NextAction
+}
+
+type NextAction struct {
+	Type         string `json:"type"`
+	RedirectURL  string `json:"redirect_url,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
 }
 type GatewayRefundResponse struct {
 	GatewayRefundID string
@@ -167,24 +176,3 @@ func (e *GatewayError) Error() string {
 }
 
 func (e *GatewayError) Unwrap() error { return e.Underlying }
-
-type SettlementReport struct {
-	GatewayID   string
-	PeriodStart time.Time
-	PeriodEnd   time.Time
-	Entries     []SettlementEntry
-}
-
-type SettlementEntry struct {
-	GatewayReferenceID string
-	Status             string
-	Amount             int64
-	Currency           string
-	GatewayFees        int64
-	FXRateAtSettlement float64
-	SettledAt          time.Time
-}
-
-type SettlementReportFetcher interface {
-	FetchSettlementReport(ctx context.Context, gatewayID string, start, end time.Time) (*SettlementReport, error)
-}

@@ -1,0 +1,624 @@
+{
+  "info": {
+    "name": "Payment Service API (FIB)",
+    "description": "Payment Service API collection with FIB (Fast Iraqi Bank) gateway. Includes all 22 endpoints for server-to-server calls, browser checkout, and webhook handling.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "X-Service-Token",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{service_token}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "tenant_id",
+      "value": "00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "key": "transaction_id",
+      "value": ""
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "gateway_id",
+      "value": "fib"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            },
+            "auth": null,
+            "description": "DB + Valkey connectivity check. No auth required."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Gateways",
+      "item": [
+        {
+          "name": "List Gateways",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways?payment_method=card",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "gateways"],
+              "query": [
+                {
+                  "key": "payment_method",
+                  "value": "card",
+                  "description": "Filter by payment method"
+                }
+              ]
+            },
+            "description": "List available gateways. Currently only FIB."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Tenant Gateways",
+      "item": [
+        {
+          "name": "List Tenant Gateways",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenants/{{tenant_id}}/gateways",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenants", "{{tenant_id}}", "gateways"]
+            },
+            "description": "List gateway configurations for a tenant."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Tenant Gateway",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenants/{{tenant_id}}/gateways/{{gateway_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenants", "{{tenant_id}}", "gateways", "{{gateway_id}}"]
+            },
+            "description": "Get a single tenant gateway config."
+          },
+          "response": []
+        },
+        {
+          "name": "Upsert Tenant Gateway (FIB)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenants/{{tenant_id}}/gateways",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenants", "{{tenant_id}}", "gateways"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gateway_id\": \"fib\",\n  \"provider\": \"fib\",\n  \"config\": {\n    \"client_id\": \"fib-client-id\",\n    \"client_secret\": \"fib-client-secret\",\n    \"base_url\": \"https://fib-sandbox.example.com\",\n    \"callback_url\": \"http://localhost:8080/webhooks/gateway/fib\"\n  },\n  \"is_active\": true\n}"
+            },
+            "description": "Create or update FIB gateway configuration for a tenant."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Tenant Gateway",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenants/{{tenant_id}}/gateways/{{gateway_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenants", "{{tenant_id}}", "gateways", "{{gateway_id}}"]
+            },
+            "description": "Delete a tenant gateway config."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Payments",
+      "item": [
+        {
+          "name": "Create Payment (FIB)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.data && res.data.transaction_id) {",
+                  "    pm.collectionVariables.set('transaction_id', res.data.transaction_id);",
+                  "    pm.collectionVariables.set('token', res.data.token);",
+                  "    console.log('Saved transaction_id:', res.data.transaction_id);",
+                  "    console.log('Saved token:', res.data.token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gateway_id\": \"fib\",\n  \"amount\": 50000,\n  \"currency\": \"IQD\",\n  \"payment_method\": \"card\",\n  \"customer_id\": \"11111111-1111-1111-1111-111111111111\",\n  \"customer_email\": \"customer@example.com\",\n  \"description\": \"Order #12345 - Premium Plan\",\n  \"metadata\": {\n    \"order_id\": \"12345\",\n    \"product\": \"Premium Plan\"\n  },\n  \"callback_url\": \"http://myapp.com/api/webhooks/payment\",\n  \"redirect_url\": \"https://myapp.com/order/12345/complete\"\n}"
+            },
+            "description": "Create a payment with FIB gateway. Returns transaction_id and token. The test script auto-saves these as collection variables."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Payment",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{transaction_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments", "{{transaction_id}}"]
+            },
+            "description": "Get payment status and details. Returns raw_metadata with FIB QR code."
+          },
+          "response": []
+        },
+        {
+          "name": "List Payments",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments?limit=10&status=PENDING,SUCCEEDED",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "10",
+                  "description": "Page size (1-100)"
+                },
+                {
+                  "key": "status",
+                  "value": "PENDING,SUCCEEDED",
+                  "description": "Filter by status"
+                }
+              ]
+            },
+            "description": "List payments with filters. Service tokens are tenant-scoped."
+          },
+          "response": []
+        },
+        {
+          "name": "List Payments (CSV)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments?limit=100",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "Page size"
+                }
+              ]
+            },
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/csv"
+              }
+            ],
+            "description": "Download transactions as CSV (Accept: text/csv header)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Refunds",
+      "item": [
+        {
+          "name": "Initiate Refund",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{transaction_id}}/refunds",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments", "{{transaction_id}}", "refunds"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 50000,\n  \"reason\": \"Customer request - duplicate charge\"\n}"
+            },
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Initiate a refund. FIB only supports full refunds. Requires ops token."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Cancels",
+      "item": [
+        {
+          "name": "Cancel Payment",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{transaction_id}}/cancel",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments", "{{transaction_id}}", "cancel"]
+            },
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-Ops-Token",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{ops_token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Cancel a PENDING transaction. Requires ops token. No request body needed."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Disputes",
+      "item": [
+        {
+          "name": "List Disputes",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/disputes?limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "disputes"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "List disputes. Filter by status, gateway_id, from, to."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Dispute",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/disputes/{{dispute_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "disputes", "{{dispute_id}}"]
+            },
+            "description": "Get dispute details with is_urgent and days_until_due."
+          },
+          "response": []
+        },
+        {
+          "name": "Submit Evidence",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/disputes/{{dispute_id}}/evidence",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "disputes", "{{dispute_id}}", "evidence"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"evidence_type\": \"RECEIPT\",\n  \"file_url\": \"https://storage.example.com/receipts/order-12345.pdf\",\n  \"notes\": \"Customer receipt for Order #12345\"\n}"
+            },
+            "description": "Submit evidence for a dispute. Evidence type must be one of: RECEIPT, INVOICE, CUSTOMER_COMMS, TERMS_OF_SERVICE, REFUND_POLICY, CANCELLATION_POLICY, OTHER."
+          },
+          "response": []
+        },
+        {
+          "name": "List Evidence",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/disputes/{{dispute_id}}/evidence",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "disputes", "{{dispute_id}}", "evidence"]
+            },
+            "description": "List all evidence submitted for a dispute."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Dead Letters",
+      "item": [
+        {
+          "name": "List Dead Letters",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/dead-letters?limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "dead-letters"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "List failed outbox events. Filter by resolved, event_type, date_from, date_to."
+          },
+          "response": []
+        },
+        {
+          "name": "Replay Dead Letter",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/v1/dead-letters/{{dead_letter_id}}/replay",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "dead-letters", "{{dead_letter_id}}", "replay"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Retrying failed webhook delivery\"\n}"
+            },
+            "description": "Replay a failed dead letter event. Returns new_event_id."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "item": [
+        {
+          "name": "Simulate FIB Webhook",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/webhooks/gateway/fib?transaction_id={{transaction_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["webhooks", "gateway", "fib"],
+              "query": [
+                {
+                  "key": "transaction_id",
+                  "value": "{{transaction_id}}",
+                  "description": "Transaction to update"
+                }
+              ]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"fib_pay_1\",\n  \"paymentId\": \"fib_pay_1\",\n  \"status\": \"PAID\"\n}"
+            },
+            "auth": null,
+            "description": "Simulate an inbound FIB webhook (status update). No auth required — gateway signature verified via config."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Browser Checkout",
+      "item": [
+        {
+          "name": "Open Checkout Page",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/pay/{{transaction_id}}?token={{token}}",
+              "host": ["{{base_url}}"],
+              "path": ["pay", "{{transaction_id}}"],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "{{token}}"
+                }
+              ]
+            },
+            "auth": null,
+            "description": "Open the FIB checkout page in browser. Shows QR code, app links, and countdown timer."
+          },
+          "response": []
+        },
+        {
+          "name": "Success Page",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/pay/success?transaction_id={{transaction_id}}&token={{token}}",
+              "host": ["{{base_url}}"],
+              "path": ["pay", "success"],
+              "query": [
+                {
+                  "key": "transaction_id",
+                  "value": "{{transaction_id}}"
+                },
+                {
+                  "key": "token",
+                  "value": "{{token}}"
+                }
+              ]
+            },
+            "auth": null,
+            "description": "Payment success landing page. Auto-redirects to redirect_url after 3s."
+          },
+          "response": []
+        },
+        {
+          "name": "Failure Page",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/pay/failure?transaction_id={{transaction_id}}&token={{token}}",
+              "host": ["{{base_url}}"],
+              "path": ["pay", "failure"],
+              "query": [
+                {
+                  "key": "transaction_id",
+                  "value": "{{transaction_id}}"
+                },
+                {
+                  "key": "token",
+                  "value": "{{token}}"
+                }
+              ]
+            },
+            "auth": null,
+            "description": "Payment failure landing page. Shows error reason and auto-redirects after 3s."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "SSE (Real-time)",
+      "item": [
+        {
+          "name": "Subscribe to Payment Events",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{transaction_id}}/events?token={{token}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "payments", "{{transaction_id}}", "events"],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "{{token}}"
+                }
+              ]
+            },
+            "auth": null,
+            "description": "Server-Sent Events stream for real-time payment status updates. Use curl or EventSource in browser: `curl -N '{{base_url}}/api/v1/payments/{{transaction_id}}/events?token={{token}}'`"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

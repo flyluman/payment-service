@@ -15,7 +15,7 @@ func (p fakePinger) Ping(ctx context.Context) error { return p.err }
 func TestHealth_OK(t *testing.T) {
 	h := NewHealthHandler(
 		Check{Name: "database", Pinger: fakePinger{}},
-		Check{Name: "redis", Pinger: fakePinger{}},
+		Check{Name: "valkey", Pinger: fakePinger{}},
 	)
 	rec := httptest.NewRecorder()
 	h.Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -33,10 +33,10 @@ func TestHealth_DBDown(t *testing.T) {
 	}
 }
 
-func TestHealth_RedisDown(t *testing.T) {
+func TestHealth_ValkeyDown(t *testing.T) {
 	h := NewHealthHandler(
 		Check{Name: "database", Pinger: fakePinger{}},
-		Check{Name: "redis", Pinger: fakePinger{err: errors.New("down")}},
+		Check{Name: "valkey", Pinger: fakePinger{err: errors.New("down")}},
 	)
 	rec := httptest.NewRecorder()
 	h.Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
