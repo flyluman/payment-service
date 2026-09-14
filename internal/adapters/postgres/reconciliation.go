@@ -167,7 +167,7 @@ func (s *ReconciliationStore) InsertEntries(ctx context.Context, entries []recon
 	}
 	br := s.db.Pool().SendBatch(ctx, batch)
 	defer br.Close()
-	for i := 0; i < len(entries); i++ {
+	for i := range entries {
 		if _, err := br.Exec(); err != nil {
 			return fmt.Errorf("reconciliation: insert entry %d: %w", i, err)
 		}

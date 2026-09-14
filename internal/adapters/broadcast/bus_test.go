@@ -132,15 +132,13 @@ func TestConcurrentAccess(t *testing.T) {
 	txnID := uuid.New()
 	var wg sync.WaitGroup
 
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 10 {
+		wg.Go(func() {
 			ch := bus.Subscribe(txnID)
 			bus.Publish(context.Background(), ports.StatusEvent{TransactionID: txnID, Status: transaction.StatusPending})
 			<-ch
 			bus.Unsubscribe(txnID, ch)
-		}()
+		})
 	}
 	wg.Wait()
 }

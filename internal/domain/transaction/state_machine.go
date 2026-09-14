@@ -2,6 +2,7 @@ package transaction
 
 import (
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -35,12 +36,7 @@ func isValidTransition(from, to Status) bool {
 	if !ok {
 		return false
 	}
-	for _, s := range allowed {
-		if s == to {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowed, to)
 }
 
 func applyTransitionEffects(tx *Txn, from, to Status, now time.Time) {

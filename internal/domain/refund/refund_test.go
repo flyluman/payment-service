@@ -46,8 +46,7 @@ func TestNew_Validation(t *testing.T) {
 func TestNew_OverRefund(t *testing.T) {
 	t.Run("exceeds", func(t *testing.T) {
 		_, err := New(uuid.New(), 60000, 100000, 60000, "r", "by")
-		var over ErrOverRefund
-		if !errors.As(err, &over) {
+		if _, ok := errors.AsType[ErrOverRefund](err); !ok {
 			t.Fatalf("expected ErrOverRefund, got %v", err)
 		}
 	})
@@ -96,8 +95,7 @@ func TestTransition_Invalid(t *testing.T) {
 	for _, c := range cases {
 		rf := &Refund{Status: c.from}
 		err := rf.Transition(c.to)
-		var invalid ErrInvalidTransition
-		if !errors.As(err, &invalid) {
+		if _, ok := errors.AsType[ErrInvalidTransition](err); !ok {
 			t.Errorf("%s → %s: expected ErrInvalidTransition, got %v", c.from, c.to, err)
 		}
 	}

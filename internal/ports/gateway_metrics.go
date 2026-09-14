@@ -12,10 +12,10 @@ type GatewayMetricsStore interface {
 }
 
 type CircuitBreakerStateRecord struct {
-	GatewayID               string
-	State                   string
-	CooldownUntil           time.Time
-	ConsecutiveFailures     int
+	GatewayID                 string
+	State                     string
+	CooldownUntil             time.Time
+	ConsecutiveFailures       int
 	LastKnownReliabilityScore int
-	UpdatedAt               time.Time
+	UpdatedAt                 time.Time
 }

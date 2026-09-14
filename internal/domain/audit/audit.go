@@ -19,11 +19,11 @@ type Entry struct {
 }
 
 const (
-	EventTypeStateChange      = "STATE_CHANGE"
-	EventTypeConfigUpdate     = "CONFIG_UPDATE"
-	EventTypeOpsAction        = "OPS_ACTION"
-	EventTypeWebhookReceived  = "WEBHOOK_RECEIVED"
-	EventTypeRefundInitiated  = "REFUND_INITIATED"
+	EventTypeStateChange     = "STATE_CHANGE"
+	EventTypeConfigUpdate    = "CONFIG_UPDATE"
+	EventTypeOpsAction       = "OPS_ACTION"
+	EventTypeWebhookReceived = "WEBHOOK_RECEIVED"
+	EventTypeRefundInitiated = "REFUND_INITIATED"
 )
 
 func NewEntry(

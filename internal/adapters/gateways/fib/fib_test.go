@@ -304,7 +304,7 @@ func TestTokenCaching(t *testing.T) {
 	}, resolveFixed)
 
 	tenantID := uuid.New()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		_, err := a.InitiatePayment(context.Background(), ports.GatewayPaymentRequest{
 			TransactionID: uuid.New(),
 			TenantID:      tenantID,

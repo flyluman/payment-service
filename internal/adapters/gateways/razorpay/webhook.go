@@ -61,7 +61,7 @@ func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret st
 		GatewayReferenceID: payment.OrderID,
 		Status:             mapWebhookPaymentStatus(payment.Status),
 		EventType:          wh.Event,
-		GatewayMetadata: meta,
+		GatewayMetadata:    meta,
 	}, nil
 }
 

@@ -75,10 +75,10 @@ func NewService(txns TransactionReader, refunds RefundRepo, outbox EventWriter, 
 	return &Service{txns: txns, refunds: refunds, outbox: outbox, tx: tx, gateways: gateways, log: log, metrics: metrics}
 }
 
-func (s *Service) SetIdempotency(g *idempotency.Guard) { s.idem = g }
-func (s *Service) SetAuditLogStore(a ports.AuditLogStore) { s.audit = a }
-func (s *Service) SetEventBus(bus ports.EventBus) { s.bus = bus }
-func (s *Service) SetNotificationService(n ports.NotificationDispatcher) { s.notif = n }
+func (s *Service) SetIdempotency(g *idempotency.Guard)                        { s.idem = g }
+func (s *Service) SetAuditLogStore(a ports.AuditLogStore)                     { s.audit = a }
+func (s *Service) SetEventBus(bus ports.EventBus)                             { s.bus = bus }
+func (s *Service) SetNotificationService(n ports.NotificationDispatcher)      { s.notif = n }
 func (s *Service) SetTenantWebhookDispatcher(d ports.TenantWebhookDispatcher) { s.twDispatcher = d }
 
 type InitiateInput struct {
@@ -245,8 +245,7 @@ func (s *Service) insertRefund(ctx context.Context, in InitiateInput, parent *tr
 }
 
 func (s *Service) mapInitiateError(in InitiateInput, err error) error {
-	var over refund.ErrOverRefund
-	if errors.As(err, &over) {
+	if over, ok := errors.AsType[refund.ErrOverRefund](err); ok {
 		s.metrics.Increment(ports.MetricRefundDuplicationBlocked, map[string]string{"reason": "over_refund"})
 		s.log.Warn(ports.LogEventRefundOverRefundBlocked, map[string]any{
 			ports.FieldTransactionID: in.TransactionID.String(),

@@ -39,6 +39,12 @@ A SaaS multitenant payment processing service supporting multiple gateways (Stri
 - [31. Running Locally](#31-running-locally)
 - [32. Testing](#32-testing)
 
+### Integration guides
+
+- [docs/frontend-integration.md](docs/frontend-integration.md) — hosted checkout, SSE, browser security
+- [docs/booking-engine-integration.md](docs/booking-engine-integration.md) — create payments, webhooks, refund/cancel
+- [postman/collection.json](postman/collection.json) — API requests (`postman/environment.json` for dev vars)
+
 ---
 
 ## 1. Overview
@@ -1051,100 +1057,44 @@ When `ENCRYPTION_KEY` is not configured, the service logs a warning and stores c
 
 ## 23. Middleware
 
-The middleware chain is applied in order (outermost → innermost):
+Outermost → innermost:
 
 ```mermaid
 flowchart LR
     A[RequestID] --> B[TraceID] --> C[RequestLog] --> D[Recover] --> E[Auth] --> F[RateLimit] --> G[ResponseCache] --> H[Handler]
 ```
 
-### RequestID
+| Middleware | Role |
+|---|---|
+| RequestID | Propagate or generate `X-Request-ID` |
+| TraceID | `X-Trace-ID` / W3C `traceparent` for correlation |
+| RequestLog | Structured access log; redacts sensitive query params |
+| Recover | Panic → `500 internal_error` |
+| Auth | `X-Service-Token` / `X-Ops-Token`; exempt `/health`, `/webhooks/*`, `/pay/*` |
+| RateLimit | Token bucket per authenticated tenant (not client-supplied tenant headers) |
+| ResponseCache | Caches `2xx` for mutating requests with `Idempotency-Key` (see §9) |
 
-- Reads `X-Request-ID` from the incoming request; generates a UUID if absent.
-- Sets `X-Request-ID` on the response.
-- Stores the ID in context for downstream handlers.
-
-### TraceID
-
-- Reads `X-Trace-ID` from the incoming request; falls back to parsing the W3C `traceparent` header (`00-<trace_id>-<span_id>-<flags>`); generates a UUID if neither is present.
-- Stores the trace ID in context for distributed tracing correlation.
-
-### RequestLog
-
-- Wraps the `http.ResponseWriter` to capture the status code.
-- Creates a per-request logger with `request_id` and `trace_id` fields injected into context.
-- Logs `http.request` with method, path, sanitized query, status, and duration (ms).
-- **Query sanitization**: sensitive query params (e.g. `token`) are replaced with `<redacted>` before logging.
-
-### Recover
-
-- Catches panics, logs `http.panic_recovered` with the trace ID and path, and returns `500 internal_error`.
-- Uses the per-request logger from context if available, otherwise falls back to the global logger.
-
-### Authenticate
-
-- Checks for `X-Service-Token` or `X-Ops-Token` headers.
-- Looks up the token in the in-memory hash map.
-- For service tokens, extracts `tenant_id` and `user_id` and stores them in context (`PrincipalFromContext`).
-- For ops tokens, sets the role to `ops` without a tenant binding.
-- Exempts paths that don't require auth: `GET /health`, `POST /webhooks/*`, `GET /pay/*`.
-
-### RateLimit
-
-- Reads the tenant ID from the authenticated principal (not from request headers).
-- Calls the token-bucket rate limiter with user, tenant, and IP dimensions.
-- Returns `429` with `Retry-After` header on rejection.
-
-### ResponseCache
-
-- Intercepts mutating requests (POST, PUT, PATCH, DELETE) that include an `Idempotency-Key` header.
-- On cache hit, replays the cached response with `Idempotent-Replayed: true` header.
-- On cache miss, records the response and caches `2xx` results.
-- Cache key: `SHA-256(tenant + ":" + method + " " + path + ":" + idempotency_key)`.
+Tracing middleware (OTel spans, `X-Trace-ID` / `X-Span-ID`) runs inside this chain when OTLP is enabled.
 
 ---
 
 ## 24. SSE Events
 
-`GET /api/v1/payments/{id}/events` provides a Server-Sent Events stream for real-time transaction status updates.
+`GET /api/v1/payments/{id}/events` streams transaction status updates (service token or checkout `?token=`).
 
-### Connection flow
+1. Auth + tenant check, subscribe on the in-memory `EventBus` for the transaction ID.
+2. Send `event: connected`, then `event: status` with `{"status":"..."}` on changes.
+3. `: heartbeat` every 30s; unsubscribe on disconnect.
 
-1. Client connects with either a service token (tenant-scoped) or checkout token (`?token=` query param).
-2. Server validates the token and checks tenant ownership.
-3. Server subscribes to the in-memory `EventBus` for the transaction ID.
-4. Server sends an initial `event: connected\ndata: {}\n\n` frame.
-5. Server enters a loop: sends `event: status\ndata: {"status":"..."}\n\n` frames when the transaction status changes, and `: heartbeat\n\n` comments every 30 seconds to keep the connection alive.
-6. On client disconnect (context cancelled), the server unsubscribes from the bus.
-
-### Event format
-
-```
-event: connected
-data: {}
-
-event: status
-data: {"status":"CAPTURED"}
-
-: heartbeat
-
-event: status
-data: {"status":"REFUNDED"}
-```
-
-### In-memory EventBus
-
-The `broadcast.InMemoryBus` is a simple pub/sub system backed by Go channels. Each transaction ID maps to a set of subscriber channels. When a transaction status changes, the payment service or webhook service publishes a `StatusEvent` to the bus, which fans out to all active subscribers.
+See [docs/frontend-integration.md](docs/frontend-integration.md) for browser usage.
 
 ---
 
 ## 25. Observability
 
-- **Structured logging** (`internal/adapters/observability.SlogLogger`) wraps `log/slog` with a custom `TRACE` level below `DEBUG`, and **automatically redacts** known-sensitive field keys (`vpa`, `card_number`, `pan`, `cvv`, `card_cvv`, `token`, `api_key`, `client_secret`, `secret`, `password`, `authorization`, `access_token`, `refresh_token`, `private_key` — case-insensitive) to `<redacted>` before they're ever written to output.
-- **Error-log contract enforcement**: `Logger.Error` checks for required fields (`error_code`, `trace_id`, `transaction_id`) on every call and appends a `log_validation_error` note if any are missing — a lightweight guardrail against error logs that are hard to correlate later, without failing the call itself.
-- **Metrics**: a `MetricRecorder` port is defined with counters/histograms/gauges for transaction outcomes, gateway fallback/circuit-breaker events, outbox publish latency/failures, and rate-limiter fallback activity (see `internal/ports/metrics.go` for the full catalog). Backends are selected via `OBSERVABILITY_BACKEND`: `otel`/`otlp` (a real OTLP exporter — grpc or `http/protobuf`), `stdout`/`noop` (discard). `config.yaml` defaults to `otel` pointing at the local `otel-collector` relay → OpenObserve (§31); in an empty environment it degrades to no-op without failing.
-- **Logs**: with `OBSERVABILITY_BACKEND=otel|otlp` the slog logger is a dual handler that writes JSON to stdout *and* bridges each record to the OTLP log provider via `otelslog` — so every log lands in OpenObserve's Logs tab while stdout keeps working unchanged. With `stdout`/`noop` it stays stdout-only.
-- **Traces**: with `otlp` a `TracerProvider` is registered globally. An OTel middleware in the request chain starts a span per request (joined to any incoming W3C `traceparent`), exposing `X-Trace-ID`/`X-Span-ID` response headers; background jobs open a `job.<name>` span each run. Trace/log exporters are wired via the same collector relay.
+- **Logs**: JSON to stdout via `slog`; sensitive field keys redacted. With `OBSERVABILITY_BACKEND=otel|otlp`, logs also export over OTLP (`otelslog`).
+- **Metrics / traces**: OTLP to the local collector ([`observability/otel-collector.yml`](observability/otel-collector.yml)) → OpenObserve when the compose stack is up (§31). Catalog: `internal/ports/metrics.go`.
+- **Request tracing**: OTel middleware joins W3C `traceparent`, sets `X-Trace-ID` / `X-Span-ID`; background jobs use `job.<name>` spans.
 
 ---
 
@@ -1264,6 +1214,8 @@ Amount mismatches within configurable thresholds (basis points + absolute cap) a
 | `GET` | `/api/v1/tenants/{tenant_id}/gateways/{gateway_id}` | service/ops token | Get a single tenant gateway config |
 | `POST` | `/api/v1/tenants/{tenant_id}/gateways` | service/ops token | Create or update a tenant gateway config |
 | `DELETE` | `/api/v1/tenants/{tenant_id}/gateways/{gateway_id}` | service/ops token | Delete a tenant gateway config |
+| `GET` | `/api/v1/tenant-webhooks` | service/ops token | List tenant outbound webhook configs |
+| `POST` | `/api/v1/tenant-webhooks/{tenant_id}` | service/ops token | Upsert tenant outbound webhook config |
 | `POST` | `/webhooks/gateway/{gateway_id}` | gateway signature | Inbound gateway status callback |
 | `GET` | `/api/v1/disputes` | service/ops token | List disputes (filter by `?status=`, `?gateway_id=`, `?date_from=`, `?date_to=`) |
 | `GET` | `/api/v1/disputes/{id}` | service/ops token | Get a single dispute |
@@ -1278,94 +1230,9 @@ Amount mismatches within configurable thresholds (basis points + absolute cap) a
 | `GET` | `/api/v1/reconciliation/jobs/{id}/entries` | service/ops token | List reconciliation entries (filter by `?mismatch_type=`, `?resolution_status=`) |
 | `POST` | `/api/v1/reconciliation/jobs/{id}/entries/{entry_id}/resolve` | service/ops token | Mark a reconciliation entry as resolved |
 
-**Manual capture flow** (`authorize` → `capture` → `settle`, ops tokens): each call acquires the processing lease (`TryAcquireDirect`) before invoking the gateway, so concurrent calls cannot double-fire; a lease loser reloads the current transaction and returns it. Terminal outcomes route through the same `finalize` machinery as the initiate flow — they emit `TRANSACTION_AUTHORIZED` / `TRANSACTION_CAPTURED` / `TRANSACTION_SETTLED` outbox events plus callback, notification, tenant webhook, audit, and SSE. An ambiguous or timeout outcome keeps the transaction in `PROCESSING` (with lease timestamps) so the lease-expiry reaper reconciles it via a read-only `CheckStatus`. `authorize` requires the gateway to be in manual-capture mode (otherwise `capture_mode` is auto and the transition is rejected).
+**Manual capture** (`authorize` → `capture` → `settle`): ops tokens; lease-guarded gateway calls; terminal states use the same finalize/outbox path as initiate (see §5). Ambiguous outcomes stay `PROCESSING` for lease reaper `CheckStatus`.
 
-### Transaction List Filters
-
-`GET /api/v1/payments` supports the following query parameters:
-
-| Parameter | Type | Description |
-|---|---|---|
-| `tenant_id` | UUID | Filter by tenant (service tokens are auto-scoped to their own tenant) |
-| `user_id` | UUID | Filter by user |
-| `status` | CSV | Filter by status (e.g. `?status=CAPTURED,FAILED`) |
-| `gateway_id` | CSV | Filter by gateway (e.g. `?gateway_id=stripe,fib`) |
-| `min_amount` | int | Minimum amount |
-| `max_amount` | int | Maximum amount |
-| `currency` | string | Filter by currency |
-| `payment_method` | CSV | Filter by payment method |
-| `date_from` | RFC3339 | Start date filter |
-| `date_to` | RFC3339 | End date filter |
-| `cursor` | string | Cursor for pagination |
-| `limit` | int | Page size (1-100, default 50) |
-
-**CSV export**: Set `Accept: text/csv` to receive the list as a CSV download.
-
-### Request/Response Examples
-
-**Create Payment:**
-```http
-POST /api/v1/payments
-X-Service-Token: test-token
-Idempotency-Key: payment-unique-key
-Content-Type: application/json
-
-{
-  "gateway_id": "stripe",
-  "amount": 50000,
-  "currency": "BDT",
-  "payment_method": "card",
-  "capture_mode": "auto",
-  "customer_id": "33333333-3333-3333-3333-333333333333",
-  "customer_email": "buyer@example.com",
-  "description": "Order #1234",
-  "metadata": { "order_id": "ORD-1234" },
-  "callback_url": "https://example.com/callback",
-  "redirect_url": "https://example.com/redirect"
-}
-```
-
-**Response (Stripe):**
-```json
-{
-  "success": true,
-  "data": {
-    "transaction_id": "txn-uuid",
-    "status": "PROCESSING",
-    "token": "checkout-token",
-    "fee_breakdown": {
-      "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "BDT" },
-      "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },
-      "gateway": { "amount": 51750, "currency": "BDT" }
-    },
-    "gateway_amount": 51750,
-    "gateway_currency": "BDT"
-  },
-  "request_id": "req-uuid",
-  "timestamp": "2026-01-01T00:00:00.000000000Z"
-}
-```
-
-**Response (FIB):**
-```json
-{
-  "success": true,
-  "data": {
-    "transaction_id": "txn-uuid",
-    "status": "PROCESSING",
-    "token": "checkout-token",
-    "fee_breakdown": {
-      "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "IQD" },
-      "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },
-      "gateway": { "amount": 51750, "currency": "IQD" }
-    },
-    "gateway_amount": 51750,
-    "gateway_currency": "IQD"
-  },
-  "request_id": "req-uuid",
-  "timestamp": "2026-01-01T00:00:00.000000000Z"
-}
-```
+List/filter query params and request examples: [postman/collection.json](postman/collection.json) and [docs/booking-engine-integration.md](docs/booking-engine-integration.md).
 
 ---
 
@@ -1443,20 +1310,25 @@ Configuration loads from `config.yaml` in the working directory unless `CONFIG_P
 
 ## 31. Running Locally
 
+### Infra (Docker Compose)
+
+Compose runs Postgres, Valkey, migrations, seed, Floci, MailHog, MockServer, OpenObserve, and the otel-collector — **not** the payment-service binary.
+
 ```bash
-# Full local stack: Postgres, Valkey, Floci (SNS/SQS/S3), MailHog (SMTP),
-# MockServer, OpenObserve (observability via otel-collector),
-# and the payment-service itself (built via the multi-stage Dockerfile)
-docker compose up --build
-
-# ...or just the infra, then run the service from source
-docker compose up -d postgres valkey
-
-SERVICE_TOKENS=test-token=11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222 \
-  go run ./cmd/server
+docker compose up -d
 ```
 
-The `payment-service` compose service builds the **multi-stage Dockerfile** (`golang:alpine` build stage → stripped static binary → `scratch` runtime with CA certs and a non-root user). Compose mounts `config.yaml` at `/app/config.yaml` (or set `CONFIG_PATH` to that path). Overrides for DB, Valkey, SNS, and SMTP come from environment in `docker-compose.yml`.
+Integration tests only need `postgres` and `valkey`: `docker compose up -d postgres valkey`.
+
+### App (recommended dev)
+
+Copy [`.env.example`](.env.example) to `.env`, then from the repo root:
+
+```bash
+go run ./cmd/server
+```
+
+Use `SERVICE_TOKENS` / `OPS_TOKENS` as in `.env.example`. Edit FIB placeholders in [`seed/seed.sql`](seed/seed.sql) before seeding ([`seed/README.md`](seed/README.md)); compose runs seed via the `db-seed` service on first `up`.
 
 ### Docker image
 
@@ -1528,7 +1400,7 @@ Notes:
 
 ### Seed Data
 
-After starting the stack, load the seed data to get FIB gateway config, sample tenant, notification templates, and a sample transaction:
+Compose applies seed on startup (`db-seed`). To re-run manually:
 
 ```bash
 psql -h localhost -U payment -d payment_dev -f seed/seed.sql
@@ -1536,7 +1408,7 @@ psql -h localhost -U payment -d payment_dev -f seed/seed.sql
 
 This creates:
 - **Gateway catalog**: Stripe, Razorpay, and FIB entries with timeouts, fee models, and metadata schemas
-- **Tenant gateway config**: FIB sandbox credentials for tenant `11111111-1111-1111-1111-111111111111`
+- **Tenant gateway config**: FIB placeholders for tenant `11111111-1111-1111-1111-111111111111` (edit before seeding)
 - **Sample transaction**: 50,000 IQD CAPTURED payment with FIB QR code metadata (tenant `00000000-...-0001`)
 - **Notification templates**: PAYMENT_SUCCESS, PAYMENT_FAILURE, REFUND_COMPLETED, REFUND_FAILED
 - **Circuit breaker state**: all gateways start in CLOSED (healthy)
@@ -1568,11 +1440,6 @@ Import `postman/collection.json` into Postman (use `postman/environment.json` fo
 - Checkout page access
 - SSE event stream
 - Reconciliation jobs
-
-### Integration Docs
-
-- `docs/booking-engine-integration.md` — server-to-server: create payments, handle webhooks, refund/cancel
-- `docs/frontend-integration.md` — browser: checkout flow, SSE events, custom UI, security
 
 ---
 

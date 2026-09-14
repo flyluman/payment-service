@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	stringType   = reflect.TypeOf("")
-	durationType = reflect.TypeOf(time.Duration(0))
+	stringType   = reflect.TypeFor[string]()
+	durationType = reflect.TypeFor[time.Duration]()
 )
 
 // validatableConfig returns a Config that passes every Validate rule, so a test
@@ -139,4 +139,3 @@ func TestLoadConfig_CONFIG_PATHMissingFallsBackToDefault(t *testing.T) {
 		t.Fatalf("service_name = %q, want from-default", cfg.App.ServiceName)
 	}
 }
-

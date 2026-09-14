@@ -57,8 +57,7 @@ func TestCircuitBreaker_InvalidTransitions(t *testing.T) {
 	for _, c := range cases {
 		cb := &CircuitBreaker{State: c.from}
 		err := cb.Transition(c.to)
-		var invalid ErrInvalidTransition
-		if !errors.As(err, &invalid) {
+		if _, ok := errors.AsType[ErrInvalidTransition](err); !ok {
 			t.Errorf("%s → %s: expected ErrInvalidTransition, got %v", c.from, c.to, err)
 		}
 	}
@@ -142,9 +141,9 @@ func TestDiscrepancyMetrics_ReliabilityScore(t *testing.T) {
 
 func TestDiscrepancyMetrics_CurrentAlertLevel(t *testing.T) {
 	cases := []struct {
-		name              string
-		r5min, r24h       float64
-		want              AlertLevel
+		name        string
+		r5min, r24h float64
+		want        AlertLevel
 	}{
 		{"auto disable", 0.25, 0, AlertLevelAutoDisable},
 		{"alert", 0.10, 0, AlertLevelAlert},

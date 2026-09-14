@@ -16,12 +16,12 @@ import (
 
 type noopLog struct{}
 
-func (noopLog) Info(string, map[string]any)  {}
-func (noopLog) Warn(string, map[string]any)  {}
+func (noopLog) Info(string, map[string]any)         {}
+func (noopLog) Warn(string, map[string]any)         {}
 func (noopLog) Error(string, map[string]any, error) {}
-func (noopLog) Debug(string, map[string]any) {}
-func (noopLog) Trace(string, map[string]any) {}
-func (noopLog) With(map[string]any) ports.Logger { return noopLog{} }
+func (noopLog) Debug(string, map[string]any)        {}
+func (noopLog) Trace(string, map[string]any)        {}
+func (noopLog) With(map[string]any) ports.Logger    { return noopLog{} }
 
 func TestHandle_EmptyCallbackURL(t *testing.T) {
 	d := NewDispatcher(&http.Client{}, noopLog{})

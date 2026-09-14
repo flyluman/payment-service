@@ -272,8 +272,7 @@ func TestInitiateRefund_OverRefundBlocked(t *testing.T) {
 	s := svc(&fakeTxns{txn: parent}, &fakeRefunds{sum: 60000}, outbox)
 
 	_, err := s.InitiateRefund(context.Background(), InitiateInput{TransactionID: parent.ID, Amount: 50000, Reason: "r", InitiatedBy: "by"})
-	var over domainrefund.ErrOverRefund
-	if !errors.As(err, &over) {
+	if _, ok := errors.AsType[domainrefund.ErrOverRefund](err); !ok {
 		t.Fatalf("expected ErrOverRefund, got %v", err)
 	}
 	if len(outbox.events) != 0 {

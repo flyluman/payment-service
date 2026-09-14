@@ -64,8 +64,9 @@ VALUES (
     max_size_bytes = EXCLUDED.max_size_bytes;
 
 -- ── Tenant gateway configs (FIB) ────────────────────────────────────────
+-- Placeholders only — set client_id/client_secret from FIB portal before seeding.
 -- Config stored as plaintext for dev (no ENCRYPTION_KEY needed).
--- In production, credentials must be encrypted.
+-- In production, credentials must be encrypted. Never commit real secrets.
 
 INSERT INTO tenant_gateway_configs (tenant_id, gateway_id, provider, encrypted_config, is_active)
 VALUES
@@ -197,7 +198,7 @@ COMMIT;
 --   fib     — FIB (Fast Iraqi Bank), IQD only, card payments, cancel supported
 --
 -- Tenant gateway config:
---   tenant 00000000-...-0001 → fib (sandbox credentials)
+--   tenant 11111111-...-1111 → fib (edit placeholders in this file before seeding)
 --
 -- Example transaction:
 --   id: 00000000-...-0001

@@ -2,6 +2,7 @@ package refund
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -136,19 +137,17 @@ func (r *Refund) Transition(toState Status) error {
 	if !ok {
 		return ErrInvalidTransition{From: r.Status, To: toState}
 	}
-	for _, s := range allowed {
-		if s == toState {
-			r.Status = toState
-			if toState.IsTerminal() {
-				now := time.Now().UTC()
-				r.ResolvedAt = &now
-			} else {
-				// Re-entering a non-terminal state (e.g. FAILED → PROCESSING
-				// retry) means the refund is unresolved again.
-				r.ResolvedAt = nil
-			}
-			return nil
+	if slices.Contains(allowed, toState) {
+		r.Status = toState
+		if toState.IsTerminal() {
+			now := time.Now().UTC()
+			r.ResolvedAt = &now
+		} else {
+			// Re-entering a non-terminal state (e.g. FAILED → PROCESSING
+			// retry) means the refund is unresolved again.
+			r.ResolvedAt = nil
 		}
+		return nil
 	}
 	return ErrInvalidTransition{From: r.Status, To: toState}
 }

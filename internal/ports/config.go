@@ -45,13 +45,13 @@ func (cb CircuitBreakerState) IsOpen() bool {
 }
 
 type GatewayFeeModel struct {
-	GatewayID                  string
-	PaymentMethod              string
-	FixedFee                   int64
-	PercentageBPS              int64
-	InterchangeCap             *int64
-	DiscountVolumeThreshold    int64
-	ChargesCurrency            string
+	GatewayID               string
+	PaymentMethod           string
+	FixedFee                int64
+	PercentageBPS           int64
+	InterchangeCap          *int64
+	DiscountVolumeThreshold int64
+	ChargesCurrency         string
 }
 
 func (f *GatewayFeeModel) CalculateFee(amountUnits, discountVolumeUnits int64) int64 {
@@ -75,4 +75,3 @@ type GatewayMetadataSchema struct {
 	RequiredKeys []string
 	MaxSizeBytes int
 }
-

@@ -20,8 +20,8 @@ const (
 	SpanCreateTransaction    = "transaction.create"
 	SpanGetTransactionStatus = "transaction.get_status"
 	SpanCancelTransaction    = "transaction.cancel"
-	SpanInitiateRefund   = "refund.initiate"
-	SpanGetRefundStatus  = "refund.get_status"
+	SpanInitiateRefund       = "refund.initiate"
+	SpanGetRefundStatus      = "refund.get_status"
 
 	SpanGatewayInitiate    = "gateway.initiate_payment"
 	SpanGatewayCheckStatus = "gateway.check_status"

@@ -24,11 +24,11 @@ func (c *captureLog) Info(event string, fields map[string]any) {
 	c.calls = append(c.calls, logCall{event: event, fields: fields})
 	c.mu.Unlock()
 }
-func (c *captureLog) Warn(string, map[string]any)  {}
+func (c *captureLog) Warn(string, map[string]any)         {}
 func (c *captureLog) Error(string, map[string]any, error) {}
-func (c *captureLog) Debug(string, map[string]any) {}
-func (c *captureLog) Trace(string, map[string]any) {}
-func (c *captureLog) With(map[string]any) ports.Logger { return c }
+func (c *captureLog) Debug(string, map[string]any)        {}
+func (c *captureLog) Trace(string, map[string]any)        {}
+func (c *captureLog) With(map[string]any) ports.Logger    { return c }
 
 func (c *captureLog) last() logCall {
 	c.mu.Lock()

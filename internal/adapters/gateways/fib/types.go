@@ -37,16 +37,16 @@ type paidBy struct {
 }
 
 type paymentStatusResponse struct {
-	ID              string        `json:"id"`
-	PaymentID       string        `json:"paymentId"`
-	Status          string        `json:"status"`
-	ValidUntil      *string       `json:"validUntil,omitempty"`
+	ID              string            `json:"id"`
+	PaymentID       string            `json:"paymentId"`
+	Status          string            `json:"status"`
+	ValidUntil      *string           `json:"validUntil,omitempty"`
 	Amount          *monetaryValueObj `json:"amount,omitempty"`
-	DecliningReason *string       `json:"decliningReason,omitempty"`
-	PaidAt          *string       `json:"paidAt,omitempty"`
-	DeclinedAt      *string       `json:"declinedAt,omitempty"`
-	PaidBy          *paidBy       `json:"paidBy,omitempty"`
-	PaidAmount      *int64        `json:"paidAmount,omitempty"`
+	DecliningReason *string           `json:"decliningReason,omitempty"`
+	PaidAt          *string           `json:"paidAt,omitempty"`
+	DeclinedAt      *string           `json:"declinedAt,omitempty"`
+	PaidBy          *paidBy           `json:"paidBy,omitempty"`
+	PaidAmount      *int64            `json:"paidAmount,omitempty"`
 }
 
 type fibError struct {

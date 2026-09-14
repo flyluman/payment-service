@@ -75,12 +75,12 @@ const (
 )
 
 const (
-	FieldTraceID        = "trace_id"
-	FieldRequestID      = "request_id"
-	FieldSpanID         = "span_id"
-	FieldTransactionID  = "transaction_id"
-	FieldTenantID       = "tenant_id"
-	FieldUserID         = "user_id"
+	FieldTraceID       = "trace_id"
+	FieldRequestID     = "request_id"
+	FieldSpanID        = "span_id"
+	FieldTransactionID = "transaction_id"
+	FieldTenantID      = "tenant_id"
+	FieldUserID        = "user_id"
 
 	FieldPaymentMethod  = "payment_method"
 	FieldGatewayID      = "gateway_id"

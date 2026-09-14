@@ -1,5 +1,7 @@
 package ports
 
+import "maps"
+
 type MetricRecorder interface {
 	Increment(metric string, tags map[string]string)
 	Histogram(metric string, value float64, tags map[string]string)
@@ -43,7 +45,7 @@ const (
 	MetricRateLimitAllowed                  = "rate_limit.allowed"
 	MetricRateLimitRejected                 = "rate_limit.rejected"
 	MetricRateLimitFallbackActive           = "rate_limit.fallback_active"
-	MetricRateLimitValkeyAvailable           = "rate_limit_valkey_available"
+	MetricRateLimitValkeyAvailable          = "rate_limit_valkey_available"
 	MetricRateLimitFallbackActivationsTotal = "rate_limit_fallback_activations_total"
 	MetricRateLimitFallbackDurationSeconds  = "rate_limit_fallback_duration_seconds"
 
@@ -80,11 +82,7 @@ func StandardTags(env, version, gatewayID, paymentMethod, tenantID string) map[s
 
 func MergeTags(base, additional map[string]string) map[string]string {
 	out := make(map[string]string, len(base)+len(additional))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range additional {
-		out[k] = v
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, additional)
 	return out
 }

@@ -14,20 +14,20 @@ import (
 	"github.com/crownroutes/payment-service/internal/adapters/broadcast"
 	"github.com/crownroutes/payment-service/internal/adapters/encryption"
 	"github.com/crownroutes/payment-service/internal/adapters/gateways"
-	"github.com/crownroutes/payment-service/internal/adapters/observability"
 	notifadapter "github.com/crownroutes/payment-service/internal/adapters/notification"
+	"github.com/crownroutes/payment-service/internal/adapters/observability"
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	"github.com/crownroutes/payment-service/internal/adapters/valkey"
 	"github.com/crownroutes/payment-service/internal/app/cancel"
 	"github.com/crownroutes/payment-service/internal/app/dispute"
-	notifapp "github.com/crownroutes/payment-service/internal/app/notification"
 	"github.com/crownroutes/payment-service/internal/app/gateway"
 	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	notifapp "github.com/crownroutes/payment-service/internal/app/notification"
 	"github.com/crownroutes/payment-service/internal/app/payment"
+	reconapp "github.com/crownroutes/payment-service/internal/app/reconciliation"
 	"github.com/crownroutes/payment-service/internal/app/refund"
 	twhapp "github.com/crownroutes/payment-service/internal/app/tenantwebhook"
 	"github.com/crownroutes/payment-service/internal/app/webhook"
-	reconapp "github.com/crownroutes/payment-service/internal/app/reconciliation"
 	"github.com/crownroutes/payment-service/internal/bootstrap"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
@@ -40,19 +40,19 @@ type deps struct {
 	logger  *observability.SlogLogger
 	metrics ports.MetricRecorder
 
-	db      *postgres.DB
+	db *postgres.DB
 
-	txnRepo          *postgres.TransactionRepository
-	refundRepo       *postgres.RefundRepository
-	outboxWriter     *postgres.OutboxWriter
-	leaseRepo        *postgres.LeaseRepository
-	transactor       *postgres.Transactor
-	configStore      *postgres.ConfigStore
-	idempotencyRepo  *postgres.IdempotencyRepository
-	webhookRepo      *postgres.WebhookRepository
+	txnRepo           *postgres.TransactionRepository
+	refundRepo        *postgres.RefundRepository
+	outboxWriter      *postgres.OutboxWriter
+	leaseRepo         *postgres.LeaseRepository
+	transactor        *postgres.Transactor
+	configStore       *postgres.ConfigStore
+	idempotencyRepo   *postgres.IdempotencyRepository
+	webhookRepo       *postgres.WebhookRepository
 	tenantConfigStore *postgres.TenantConfigStore
 
-	registry  *gateways.Registry
+	registry   *gateways.Registry
 	gatewaySvc *gateway.Service
 	paymentSvc *payment.Service
 	refundSvc  *refund.Service
@@ -125,7 +125,6 @@ func run() error {
 		return err
 	}
 	defer db.Close()
-
 
 	// ── Valkey ───────────────────────────────────────────────────────────
 	valkeyClient, err := valkey.New(cfg.Valkey)
@@ -270,16 +269,16 @@ func run() error {
 		logger:  logger,
 		metrics: metrics,
 
-		db:      db,
+		db: db,
 
-		txnRepo:         txnRepo,
-		refundRepo:      refundRepo,
-		outboxWriter:    outboxWriter,
-		leaseRepo:       leaseRepo,
-		transactor:      transactor,
-		configStore:     configStore,
-		idempotencyRepo: idempotencyRepo,
-		webhookRepo:     webhookRepo,
+		txnRepo:           txnRepo,
+		refundRepo:        refundRepo,
+		outboxWriter:      outboxWriter,
+		leaseRepo:         leaseRepo,
+		transactor:        transactor,
+		configStore:       configStore,
+		idempotencyRepo:   idempotencyRepo,
+		webhookRepo:       webhookRepo,
 		tenantConfigStore: tenantConfigStore,
 
 		registry:   registry,
@@ -297,7 +296,7 @@ func run() error {
 		cbStore:       cbStore,
 		intentStore:   intentStore,
 		responseCache: responseCache,
-		eventBus:     eventBus,
+		eventBus:      eventBus,
 	}
 
 	// ── Launch subsystems ────────────────────────────────────────────────

@@ -38,17 +38,17 @@ type GatewayMetadataReader interface {
 }
 
 type PayHandler struct {
-	txnByID          TransactionByIDGetter
-	templates        *template.Template
-	log              ports.Logger
+	txnByID           TransactionByIDGetter
+	templates         *template.Template
+	log               ports.Logger
 	gatewayMetaReader GatewayMetadataReader
 }
 
 func NewPayHandler(txnByID TransactionByIDGetter, templates *template.Template, log ports.Logger, gatewayMetaReader GatewayMetadataReader) *PayHandler {
 	return &PayHandler{
-		txnByID:          txnByID,
-		templates:        templates,
-		log:              log,
+		txnByID:           txnByID,
+		templates:         templates,
+		log:               log,
 		gatewayMetaReader: gatewayMetaReader,
 	}
 }

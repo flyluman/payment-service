@@ -41,7 +41,7 @@ func (f *fakeLogger) Warn(string, map[string]any)         { f.warns++ }
 func (f *fakeLogger) Error(string, map[string]any, error) { f.errs++ }
 func (f *fakeLogger) Debug(string, map[string]any)        {}
 func (f *fakeLogger) Trace(string, map[string]any)        {}
-func (f *fakeLogger) With(map[string]any) ports.Logger     { return f }
+func (f *fakeLogger) With(map[string]any) ports.Logger    { return f }
 
 func TestRunOnce_RetriesStaleRefunds(t *testing.T) {
 	id1 := uuid.New()

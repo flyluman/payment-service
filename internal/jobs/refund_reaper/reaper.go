@@ -69,16 +69,16 @@ func (r *Reaper) RunOnce(ctx context.Context) error {
 		rf, err := r.retry.RetryStaleRefund(ctx, id)
 		if err != nil {
 			r.log.Error(ports.LogEventRefundRetry, map[string]any{
-				ports.FieldErrorCode:  "refund_retry_failed",
-				ports.FieldRefundID:   id.String(),
+				ports.FieldErrorCode:     "refund_retry_failed",
+				ports.FieldRefundID:      id.String(),
 				ports.FieldTransactionID: "",
 			}, err)
 			continue
 		}
 		r.log.Info(ports.LogEventRefundRetry, map[string]any{
-			ports.FieldRefundID:   id.String(),
-			ports.FieldNewState:   string(rf.Status),
-			ports.FieldErrorCode:  "",
+			ports.FieldRefundID:  id.String(),
+			ports.FieldNewState:  string(rf.Status),
+			ports.FieldErrorCode: "",
 		})
 	}
 	return nil

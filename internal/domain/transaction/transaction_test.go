@@ -75,7 +75,7 @@ func TestStatus_IsTerminal(t *testing.T) {
 	terminal := map[Status]bool{
 		StatusCaptured: true, StatusCancelled: true, StatusRefunded: true, StatusRefundFailed: true,
 		StatusSettled: true, StatusRefundPending: true, StatusPartiallyRefunded: true, StatusDisputed: true,
-		StatusFailed: true,
+		StatusFailed:  true,
 		StatusPending: false, StatusProcessing: false, StatusAuthorized: false,
 	}
 	for s, want := range terminal {

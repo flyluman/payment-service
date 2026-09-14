@@ -35,7 +35,7 @@ func TestTenantConfigStore_EncryptDecryptRoundTrip(t *testing.T) {
 	tenantID := uuid.New()
 	rawConfig := `{"api_key":"sk_live_real_key_abc123","base_url":"https://api.stripe.com","webhook_secret":"whsec_xyz"}`
 	cfg := &gateway.TenantGatewayConfig{
-		TenantID: tenantID,
+		TenantID:  tenantID,
 		GatewayID: "stripe",
 		Provider:  gateway.ProviderStripe,
 		Config:    json.RawMessage(rawConfig),
@@ -87,7 +87,7 @@ func TestTenantConfigStore_EncryptedBytesDontContainPlaintext(t *testing.T) {
 	tenantID := uuid.New()
 	rawConfig := `{"api_key":"sk_live_secret_abc"}`
 	cfg := &gateway.TenantGatewayConfig{
-		TenantID: tenantID,
+		TenantID:  tenantID,
 		GatewayID: "stripe",
 		Provider:  gateway.ProviderStripe,
 		Config:    json.RawMessage(rawConfig),
@@ -130,7 +130,7 @@ func TestTenantConfigStore_WrongEncryptionKeyFails(t *testing.T) {
 	tenantID := uuid.New()
 	rawConfig := `{"api_key":"sk_live_secret_xyz"}`
 	cfg := &gateway.TenantGatewayConfig{
-		TenantID: tenantID,
+		TenantID:  tenantID,
 		GatewayID: "stripe",
 		Provider:  gateway.ProviderStripe,
 		Config:    json.RawMessage(rawConfig),

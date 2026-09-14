@@ -31,7 +31,7 @@ func (e ErrMissingRate) Error() string {
 //   - Fees: how fees are composed (service fee, fixed charge, optional exchange info)
 //   - Gateway: what the gateway receives (amount + currency)
 type Breakdown struct {
-	Summary Summary  `json:"summary"`
+	Summary Summary   `json:"summary"`
 	Fees    FeeDetail `json:"fees"`
 	Gateway *Gateway  `json:"gateway,omitempty"`
 }
@@ -46,9 +46,9 @@ type Summary struct {
 
 // FeeDetail breaks down each fee component. All amounts in user's currency.
 type FeeDetail struct {
-	ServiceFee  int64    `json:"service_fee"`
-	FixedCharge int64    `json:"fixed_charge"`
-	Total       int64    `json:"total"`
+	ServiceFee  int64     `json:"service_fee"`
+	FixedCharge int64     `json:"fixed_charge"`
+	Total       int64     `json:"total"`
 	Exchange    *Exchange `json:"exchange,omitempty"`
 }
 

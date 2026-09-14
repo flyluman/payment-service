@@ -16,7 +16,7 @@ type stripePaymentIntent struct {
 }
 
 type stripeNextAction struct {
-	Type        string `json:"type"`
+	Type          string `json:"type"`
 	RedirectToURL *struct {
 		URL string `json:"url"`
 	} `json:"redirect_to_url,omitempty"`

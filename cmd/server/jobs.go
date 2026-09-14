@@ -8,13 +8,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
-	leaseexpiry "github.com/crownroutes/payment-service/internal/jobs/lease_expiry"
-	partitionmanager "github.com/crownroutes/payment-service/internal/jobs/partition_manager"
 	gatewaymetrics "github.com/crownroutes/payment-service/internal/jobs/gateway_metrics"
-	tenantwebhook "github.com/crownroutes/payment-service/internal/jobs/tenant_webhook"
+	leaseexpiry "github.com/crownroutes/payment-service/internal/jobs/lease_expiry"
 	notifprocessor "github.com/crownroutes/payment-service/internal/jobs/notification"
-	refundreaper "github.com/crownroutes/payment-service/internal/jobs/refund_reaper"
+	partitionmanager "github.com/crownroutes/payment-service/internal/jobs/partition_manager"
 	reconjob "github.com/crownroutes/payment-service/internal/jobs/reconciliation"
+	refundreaper "github.com/crownroutes/payment-service/internal/jobs/refund_reaper"
+	tenantwebhook "github.com/crownroutes/payment-service/internal/jobs/tenant_webhook"
 )
 
 const defaultPartitionInterval = time.Hour
@@ -103,13 +103,13 @@ func startJobs(ctx context.Context, d *deps) error {
 	defer refundReaperTicker.Stop()
 
 	logger.Info("jobs.scheduled", map[string]any{
-		"lease_expiry_interval":        leaseInterval.String(),
-		"partition_manager_interval":   partInterval.String(),
-		"gateway_metrics_interval":     gwMetricsInterval.String(),
-		"tenant_webhook_interval":      twhInterval.String(),
-		"notification_interval":        notifInterval.String(),
-		"reconciliation_interval":      reconInterval.String(),
-		"refund_reaper_interval":       refundReaperInterval.String(),
+		"lease_expiry_interval":      leaseInterval.String(),
+		"partition_manager_interval": partInterval.String(),
+		"gateway_metrics_interval":   gwMetricsInterval.String(),
+		"tenant_webhook_interval":    twhInterval.String(),
+		"notification_interval":      notifInterval.String(),
+		"reconciliation_interval":    reconInterval.String(),
+		"refund_reaper_interval":     refundReaperInterval.String(),
 	})
 
 	for {

@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/crownroutes/payment-service/internal/api/middleware"
 	"net/http"
 	"net/http/httptest"
-	"github.com/crownroutes/payment-service/internal/api/middleware"
 	"testing"
 	"time"
 

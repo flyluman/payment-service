@@ -38,6 +38,10 @@ build/
 .env.local
 .env.*.local
 
+# Local agent/IDE context (not for GitHub)
+AGENTS.md
+.cursor/rules/
+
 # OS files
 Thumbs.db
 

@@ -15,13 +15,13 @@ import (
 )
 
 type Worker struct {
-	reader       ports.TenantWebhookDeliveryReader
-	updater      ports.TenantWebhookDeliveryUpdater
-	config       ports.TenantWebhookConfigStore
-	client       *http.Client
-	logger       logger
-	maxAttempts  int
-	maxBackoff   time.Duration
+	reader      ports.TenantWebhookDeliveryReader
+	updater     ports.TenantWebhookDeliveryUpdater
+	config      ports.TenantWebhookConfigStore
+	client      *http.Client
+	logger      logger
+	maxAttempts int
+	maxBackoff  time.Duration
 }
 
 type logger interface {

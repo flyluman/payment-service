@@ -8,12 +8,11 @@ const shardCount = 64
 
 func TestOwnedShards_EveryShardHasReplicationFactorOwners(t *testing.T) {
 	for _, workers := range []int{1, 2, 3, 5, 8} {
-		want := ReplicationFactor
-		if workers < want {
-			want = workers // can't have more distinct replicas than workers
-		}
+		want := min(workers,
+			// can't have more distinct replicas than workers
+			ReplicationFactor)
 		seen := make(map[int]int) // shard -> how many workers own it
-		for w := 0; w < workers; w++ {
+		for w := range workers {
 			for _, s := range OwnedShards(w, workers, shardCount) {
 				seen[s]++
 			}
@@ -39,7 +38,7 @@ func TestOwnedShards_SingleWorkerOwnsAll(t *testing.T) {
 func TestOwnedShards_TwoWorkersEachOwnEverything(t *testing.T) {
 	// With exactly RF workers, redundancy means both cover the whole keyspace —
 	// this is the "2 nodes store all the data" case.
-	for w := 0; w < 2; w++ {
+	for w := range 2 {
 		if n := len(OwnedShards(w, 2, shardCount)); n != shardCount {
 			t.Errorf("with 2 workers (RF=2), worker %d should own all %d shards, got %d", w, shardCount, n)
 		}
@@ -64,7 +63,7 @@ func TestOwnedShards_ReasonableBalance(t *testing.T) {
 	// Each shard has ReplicationFactor owners, so total ownership is
 	// shardCount*RF spread across the workers.
 	ideal := shardCount * ReplicationFactor / workers
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		n := len(OwnedShards(w, workers, shardCount))
 		// Consistent hashing with virtual nodes won't be perfectly even, but no
 		// worker should carry more than ~2x its fair share on 64 shards.
@@ -83,7 +82,7 @@ func TestOwnedShards_ScaleOutOnlyAddsNewWorker(t *testing.T) {
 		before := replicaSets(n, shardCount)
 		after := replicaSets(n+1, shardCount)
 		changed := 0
-		for shard := 0; shard < shardCount; shard++ {
+		for shard := range shardCount {
 			beforeSet := make(map[int]bool, len(before[shard]))
 			for _, w := range before[shard] {
 				beforeSet[w] = true

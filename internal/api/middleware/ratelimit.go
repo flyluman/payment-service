@@ -38,10 +38,7 @@ func RateLimit(limiter Limiter, cfg RateLimitConfig, log ports.Logger) func(http
 
 			decision := limiter.Allow(r.Context(), userID, tenantID, ip, cfg.Capacity, cfg.RefillPerSec)
 			if !decision.Allowed {
-				retrySec := int(decision.RetryAfter.Seconds())
-				if retrySec < 1 {
-					retrySec = 1
-				}
+				retrySec := max(int(decision.RetryAfter.Seconds()), 1)
 				w.Header().Set("Retry-After", strconv.Itoa(retrySec))
 				log.Warn(ports.LogEventRateLimitRejected, map[string]any{
 					"ip":   ip,

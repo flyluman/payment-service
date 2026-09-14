@@ -9,7 +9,7 @@ func TestStandardTags(t *testing.T) {
 		"service_version": "v1.2.3",
 		"gateway_id":      "razorpay",
 		"payment_method":  "card",
-		"tenant_id":     "merchant-1",
+		"tenant_id":       "merchant-1",
 	}
 	for k, v := range want {
 		if tags[k] != v {

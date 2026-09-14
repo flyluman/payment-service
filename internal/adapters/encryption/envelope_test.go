@@ -202,10 +202,8 @@ func TestEnvelope_ConcurrentUse(t *testing.T) {
 	e := NewEnvelope(testKM(t), Config{MaxDEKUses: 4})
 	ctx := context.Background()
 	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 32 {
+		wg.Go(func() {
 			blob, err := e.Encrypt(ctx, []byte("payload"), []byte("aad"))
 			if err != nil {
 				t.Error(err)
@@ -219,7 +217,7 @@ func TestEnvelope_ConcurrentUse(t *testing.T) {
 			if !bytes.Equal(got, []byte("payload")) {
 				t.Error("concurrent round trip mismatch")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

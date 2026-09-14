@@ -215,7 +215,7 @@ func TestBackoff_Caps(t *testing.T) {
 		{100, 5 * time.Second, 10 * time.Second}, // exponent capped, no shift overflow
 	}
 	for _, c := range cases {
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			got := w.backoff(c.attempt)
 			if got < c.min || got > c.max {
 				t.Fatalf("attempt %d: backoff %v outside [%v, %v]", c.attempt, got, c.min, c.max)

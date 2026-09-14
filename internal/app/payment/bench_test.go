@@ -44,14 +44,14 @@ func BenchmarkCreatePayment(b *testing.B) {
 
 func BenchmarkProcessPayment(b *testing.B) {
 	baseTxn := &transaction.Txn{
-		ID:                   uuid.New(),
-		TenantID:             uuid.New(),
-		UserID:               uuid.New(),
-		Amount:               150000,
-		Currency:             "BDT",
-		PaymentMethod:        transaction.PaymentMethodCard,
-		Status:               transaction.StatusPending,
-		GatewayID:            "razorpay",
+		ID:                      uuid.New(),
+		TenantID:                uuid.New(),
+		UserID:                  uuid.New(),
+		Amount:                  150000,
+		Currency:                "BDT",
+		PaymentMethod:           transaction.PaymentMethodCard,
+		Status:                  transaction.StatusPending,
+		GatewayID:               "razorpay",
 		EstimatedTimeoutSeconds: 30,
 	}
 
@@ -106,5 +106,3 @@ func BenchmarkProcessPayment(b *testing.B) {
 		}
 	})
 }
-
-

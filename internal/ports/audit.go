@@ -20,9 +20,9 @@ type AuditEntry struct {
 }
 
 const (
-	AuditEventTypeStateChange = "STATE_CHANGE"
-	AuditEventTypeConfigUpdate = "CONFIG_UPDATE"
-	AuditEventTypeOpsAction   = "OPS_ACTION"
+	AuditEventTypeStateChange     = "STATE_CHANGE"
+	AuditEventTypeConfigUpdate    = "CONFIG_UPDATE"
+	AuditEventTypeOpsAction       = "OPS_ACTION"
 	AuditEventTypeWebhookReceived = "WEBHOOK_RECEIVED"
 	AuditEventTypeRefundInitiated = "REFUND_INITIATED"
 )

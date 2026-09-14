@@ -4,19 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"io/fs"
+	"net/http"
 	"time"
 
 	"github.com/crownroutes/payment-service/config"
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	"github.com/crownroutes/payment-service/internal/adapters/security"
 	"github.com/crownroutes/payment-service/internal/adapters/valkey"
-	"github.com/crownroutes/payment-service/internal/domain/gateway"
-	"github.com/crownroutes/payment-service/web"
 	"github.com/crownroutes/payment-service/internal/api"
 	"github.com/crownroutes/payment-service/internal/api/handlers"
 	"github.com/crownroutes/payment-service/internal/api/middleware"
+	"github.com/crownroutes/payment-service/internal/domain/gateway"
+	"github.com/crownroutes/payment-service/web"
 )
 
 func startAPI(ctx context.Context, d *deps) error {
@@ -68,9 +68,9 @@ func startAPI(ctx context.Context, d *deps) error {
 			handlers.Check{Name: "database", Pinger: d.db},
 			handlers.Check{Name: "valkey", Pinger: d.valkeyClient},
 		),
-		Logger:  logger,
-		Auth:    authProvider,
-		Limiter: limiterAdapter{rl: d.rateLimiter},
+		Logger:        logger,
+		Auth:          authProvider,
+		Limiter:       limiterAdapter{rl: d.rateLimiter},
 		ResponseCache: d.responseCache,
 		RateLimit: middleware.RateLimitConfig{
 			Capacity:     cfg.RateLimit.Capacity,

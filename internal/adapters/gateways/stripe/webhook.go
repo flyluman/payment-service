@@ -133,7 +133,7 @@ func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret st
 }
 
 func parseStripeSignature(header string) (ts int64, v1 string, ok bool) {
-	for _, part := range strings.Split(header, ",") {
+	for part := range strings.SplitSeq(header, ",") {
 		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
 		if len(kv) != 2 {
 			continue

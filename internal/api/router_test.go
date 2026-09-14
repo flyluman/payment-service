@@ -8,15 +8,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"io"
-	"log/slog"
-	"github.com/crownroutes/payment-service/internal/api/middleware"
 	"github.com/crownroutes/payment-service/internal/adapters/observability"
 	"github.com/crownroutes/payment-service/internal/api/handlers"
+	"github.com/crownroutes/payment-service/internal/api/middleware"
 	"github.com/crownroutes/payment-service/internal/app/idempotency"
 	"github.com/crownroutes/payment-service/internal/app/payment"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	"github.com/crownroutes/payment-service/internal/ports"
+	"io"
+	"log/slog"
 )
 
 type stubService struct{ txn *transaction.Txn }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 )
 
 var ErrKeyRequired = errors.New("idempotency: key required")
@@ -90,14 +91,14 @@ func Composite(merchant, operation, key string) string {
 }
 
 func RequestHash(parts ...string) string {
-	joined := ""
+	var joined strings.Builder
 	for i, p := range parts {
 		if i > 0 {
-			joined += "\x1f"
+			joined.WriteString("\x1f")
 		}
-		joined += p
+		joined.WriteString(p)
 	}
-	return hash(joined)
+	return hash(joined.String())
 }
 
 func hash(s string) string {

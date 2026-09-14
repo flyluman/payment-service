@@ -1,6 +1,7 @@
 package dispute
 
 import (
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,15 +65,13 @@ func (d *Dispute) Transition(to Status) error {
 	if !ok {
 		return ErrInvalidTransition
 	}
-	for _, s := range allowed {
-		if s == to {
-			d.Status = to
-			if to == StatusWon || to == StatusLost || to == StatusAccepted || to == StatusExpired {
-				now := time.Now().UTC()
-				d.ResolvedAt = &now
-			}
-			return nil
+	if slices.Contains(allowed, to) {
+		d.Status = to
+		if to == StatusWon || to == StatusLost || to == StatusAccepted || to == StatusExpired {
+			now := time.Now().UTC()
+			d.ResolvedAt = &now
 		}
+		return nil
 	}
 	return ErrInvalidTransition
 }

@@ -206,8 +206,7 @@ func (s *Service) ResolveCancelRefund(ctx context.Context, transactionID uuid.UU
 		IdempotencyKey: "cancel-resolution:" + transactionID.String(),
 	})
 	if err != nil {
-		var over refund.ErrOverRefund
-		if errors.As(err, &over) {
+		if _, ok := errors.AsType[refund.ErrOverRefund](err); ok {
 			return nil
 		}
 		return fmt.Errorf("refund: cancel resolution for %s: %w", transactionID, err)
@@ -245,8 +244,7 @@ func (s *Service) callGateway(ctx context.Context, adapter ports.GatewayAdapter,
 		Reason:             rf.Reason,
 	})
 	if err != nil {
-		var gwErr *ports.GatewayError
-		if errors.As(err, &gwErr) {
+		if gwErr, ok := errors.AsType[*ports.GatewayError](err); ok {
 			return nil, gwErr
 		}
 		return nil, &ports.GatewayError{

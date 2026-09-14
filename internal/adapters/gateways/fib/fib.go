@@ -362,10 +362,7 @@ func accessTokenRefreshSkew(ttl int) time.Duration {
 	if ttl <= 0 {
 		return 0
 	}
-	d := time.Duration(float64(ttl) * 0.1 * float64(time.Second))
-	if d > 30*time.Second {
-		d = 30 * time.Second
-	}
+	d := min(time.Duration(float64(ttl)*0.1*float64(time.Second)), 30*time.Second)
 	return d
 }
 

@@ -41,7 +41,7 @@ func (a *Adapter) FetchSettlementReport(ctx context.Context, tenantID uuid.UUID,
 	var all []balanceTransaction
 	var startingAfter string
 
-	for page := 0; page < 100; page++ {
+	for range 100 {
 		q := url.Values{}
 		q.Set("created[gte]", strconv.FormatInt(start.Unix(), 10))
 		q.Set("created[lte]", strconv.FormatInt(end.Unix(), 10))

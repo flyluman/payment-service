@@ -9,13 +9,13 @@ import (
 type EvidenceType string
 
 const (
-	EvidenceReceipt             EvidenceType = "RECEIPT"
-	EvidenceInvoice             EvidenceType = "INVOICE"
-	EvidenceCustomerComms       EvidenceType = "CUSTOMER_COMMS"
-	EvidenceTermsOfService      EvidenceType = "TERMS_OF_SERVICE"
-	EvidenceRefundPolicy        EvidenceType = "REFUND_POLICY"
-	EvidenceCancellationPolicy  EvidenceType = "CANCELLATION_POLICY"
-	EvidenceOther               EvidenceType = "OTHER"
+	EvidenceReceipt            EvidenceType = "RECEIPT"
+	EvidenceInvoice            EvidenceType = "INVOICE"
+	EvidenceCustomerComms      EvidenceType = "CUSTOMER_COMMS"
+	EvidenceTermsOfService     EvidenceType = "TERMS_OF_SERVICE"
+	EvidenceRefundPolicy       EvidenceType = "REFUND_POLICY"
+	EvidenceCancellationPolicy EvidenceType = "CANCELLATION_POLICY"
+	EvidenceOther              EvidenceType = "OTHER"
 )
 
 type Evidence struct {

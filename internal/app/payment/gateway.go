@@ -42,8 +42,7 @@ func (s *Service) checkStatus(ctx context.Context, adapter ports.GatewayAdapter,
 		IdempotencyKey:     txn.GatewayIdempotencyKey,
 	})
 	if err != nil {
-		var gwErr *ports.GatewayError
-		if errors.As(err, &gwErr) {
+		if gwErr, ok := errors.AsType[*ports.GatewayError](err); ok {
 			return nil, gwErr
 		}
 		return nil, &ports.GatewayError{
@@ -253,8 +252,7 @@ func (s *Service) callGateway(ctx context.Context, adapter ports.GatewayAdapter,
 		AttemptNumber:  1,
 	})
 	if err != nil {
-		var gwErr *ports.GatewayError
-		if errors.As(err, &gwErr) {
+		if gwErr, ok := errors.AsType[*ports.GatewayError](err); ok {
 			return nil, gwErr
 		}
 		return nil, &ports.GatewayError{

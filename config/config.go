@@ -78,13 +78,13 @@ type AWSConfig struct {
 }
 
 type OutboxConfig struct {
-	ShardCount                int   `mapstructure:"shard_count"`
-	WALLagAlertThresholdMB    int64 `mapstructure:"wal_lag_alert_threshold_mb"`
-	WALLagCriticalThresholdMB int64 `mapstructure:"wal_lag_critical_threshold_mb"`
-	PollIntervalSec           int   `mapstructure:"poll_interval_sec"`
-	MaxAttempts               int   `mapstructure:"max_attempts"`
-	BatchSize                 int   `mapstructure:"batch_size"`
-	ClaimTTLSec               int   `mapstructure:"claim_ttl_sec"`
+	ShardCount                int    `mapstructure:"shard_count"`
+	WALLagAlertThresholdMB    int64  `mapstructure:"wal_lag_alert_threshold_mb"`
+	WALLagCriticalThresholdMB int64  `mapstructure:"wal_lag_critical_threshold_mb"`
+	PollIntervalSec           int    `mapstructure:"poll_interval_sec"`
+	MaxAttempts               int    `mapstructure:"max_attempts"`
+	BatchSize                 int    `mapstructure:"batch_size"`
+	ClaimTTLSec               int    `mapstructure:"claim_ttl_sec"`
 	Publisher                 string `mapstructure:"publisher"`
 	SNSAggregateVersionAttr   bool   `mapstructure:"sns_aggregate_version_attr"`
 	WorkerIndex               int    `mapstructure:"worker_index"`
@@ -92,11 +92,11 @@ type OutboxConfig struct {
 }
 
 type RateLimitConfig struct {
-	FallbackMultiplier  float64 `mapstructure:"fallback_multiplier"`
-	LocalMaxBuckets     int     `mapstructure:"local_max_buckets"`
-	HealthCheckIntervalMS int   `mapstructure:"health_check_interval_ms"`
-	Capacity            int64   `mapstructure:"capacity"`
-	RefillPerSec        float64 `mapstructure:"refill_per_sec"`
+	FallbackMultiplier    float64 `mapstructure:"fallback_multiplier"`
+	LocalMaxBuckets       int     `mapstructure:"local_max_buckets"`
+	HealthCheckIntervalMS int     `mapstructure:"health_check_interval_ms"`
+	Capacity              int64   `mapstructure:"capacity"`
+	RefillPerSec          float64 `mapstructure:"refill_per_sec"`
 }
 
 type ObservabilityConfig struct {
@@ -220,78 +220,78 @@ func LoadConfig() (*Config, error) {
 	v.SetDefault("rate_limit.fallback_multiplier", 0.9)
 
 	envBindings := map[string]string{
-		"app.service_name":                 "SERVICE_NAME",
-		"app.environment":                  "ENVIRONMENT",
-		"app.service_version":              "SERVICE_VERSION",
-		"app.port":                         "PORT",
-		"app.mtls_strict_mode":             "MTLS_STRICT_MODE",
-		"database.primary_host":            "DATABASE_PRIMARY_HOST",
-		"database.replica_host":            "DATABASE_REPLICA_HOST",
-		"database.port":                    "DATABASE_PORT",
-		"database.name":                    "DATABASE_NAME",
-		"database.user":                    "DATABASE_USER",
-		"database.password":                "DATABASE_PASSWORD",
-		"database.ssl_mode":                "DATABASE_SSL_MODE",
-		"database.max_open_conns":          "DATABASE_MAX_OPEN_CONNS",
-		"database.max_idle_conns":          "DATABASE_MAX_IDLE_CONNS",
-		"database.conn_max_lifetime_sec":   "DATABASE_CONN_MAX_LIFETIME",
-		"database.conn_max_idle_time_sec":  "DATABASE_CONN_MAX_IDLE_TIME",
-		"database.health_check_period_sec": "DATABASE_HEALTH_CHECK_PERIOD",
-		"valkey.addrs":                     "VALKEY_ADDRS",
-		"valkey.rate_limit_db":             "VALKEY_RATE_LIMIT_DB",
-		"valkey.cache_db":                  "VALKEY_CACHE_DB",
-		"valkey.dial_timeout_sec":          "VALKEY_DIAL_TIMEOUT",
-		"valkey.read_timeout_sec":          "VALKEY_READ_TIMEOUT",
-		"valkey.write_timeout_sec":         "VALKEY_WRITE_TIMEOUT",
-		"sns.payment_events_topic":         "SNS_PAYMENT_EVENTS_TOPIC",
-		"aws.region":                       "AWS_REGION",
+		"app.service_name":                     "SERVICE_NAME",
+		"app.environment":                      "ENVIRONMENT",
+		"app.service_version":                  "SERVICE_VERSION",
+		"app.port":                             "PORT",
+		"app.mtls_strict_mode":                 "MTLS_STRICT_MODE",
+		"database.primary_host":                "DATABASE_PRIMARY_HOST",
+		"database.replica_host":                "DATABASE_REPLICA_HOST",
+		"database.port":                        "DATABASE_PORT",
+		"database.name":                        "DATABASE_NAME",
+		"database.user":                        "DATABASE_USER",
+		"database.password":                    "DATABASE_PASSWORD",
+		"database.ssl_mode":                    "DATABASE_SSL_MODE",
+		"database.max_open_conns":              "DATABASE_MAX_OPEN_CONNS",
+		"database.max_idle_conns":              "DATABASE_MAX_IDLE_CONNS",
+		"database.conn_max_lifetime_sec":       "DATABASE_CONN_MAX_LIFETIME",
+		"database.conn_max_idle_time_sec":      "DATABASE_CONN_MAX_IDLE_TIME",
+		"database.health_check_period_sec":     "DATABASE_HEALTH_CHECK_PERIOD",
+		"valkey.addrs":                         "VALKEY_ADDRS",
+		"valkey.rate_limit_db":                 "VALKEY_RATE_LIMIT_DB",
+		"valkey.cache_db":                      "VALKEY_CACHE_DB",
+		"valkey.dial_timeout_sec":              "VALKEY_DIAL_TIMEOUT",
+		"valkey.read_timeout_sec":              "VALKEY_READ_TIMEOUT",
+		"valkey.write_timeout_sec":             "VALKEY_WRITE_TIMEOUT",
+		"sns.payment_events_topic":             "SNS_PAYMENT_EVENTS_TOPIC",
+		"aws.region":                           "AWS_REGION",
 		"outbox.wal_lag_alert_threshold_mb":    "OUTBOX_RELAY_WAL_LAG_ALERT_THRESHOLD_MB",
 		"outbox.wal_lag_critical_threshold_mb": "OUTBOX_RELAY_WAL_LAG_CRITICAL_THRESHOLD_MB",
-		"outbox.poll_interval_sec":         "OUTBOX_RELAY_POLL_INTERVAL_SEC",
-		"outbox.max_attempts":              "OUTBOX_RELAY_MAX_ATTEMPTS",
-		"outbox.batch_size":                "OUTBOX_RELAY_BATCH_SIZE",
-		"outbox.claim_ttl_sec":             "OUTBOX_RELAY_CLAIM_TTL_SEC",
-		"outbox.publisher":                 "OUTBOX_PUBLISHER",
-		"outbox.shard_count":                "OUTBOX_SHARD_COUNT",
-		"outbox.sns_aggregate_version_attr": "OUTBOX_SNS_AGGREGATE_VERSION_ATTRIBUTE",
-		"outbox.worker_index":              "RELAY_WORKER_INDEX",
-		"outbox.worker_count":              "RELAY_WORKER_COUNT",
-		"rate_limit.fallback_multiplier":   "RATE_LIMIT_FALLBACK_MULTIPLIER",
-		"rate_limit.local_max_buckets":     "RATE_LIMIT_LOCAL_MAX_BUCKETS",
-		"rate_limit.health_check_interval_ms": "RATE_LIMIT_VALKEY_HEALTH_CHECK_INTERVAL_MS",
-		"rate_limit.capacity":              "RATE_LIMIT_CAPACITY",
-		"rate_limit.refill_per_sec":        "RATE_LIMIT_REFILL_PER_SEC",
-		"gateway.http_timeout_sec":          "GATEWAY_HTTP_TIMEOUT",
-		"gateway.circuit_breaker_threshold":  "CIRCUIT_BREAKER_FAILURE_THRESHOLD",
-		"notification.smtp.host":            "SMTP_HOST",
-		"notification.smtp.port":            "SMTP_PORT",
-		"notification.smtp.username":        "SMTP_USERNAME",
-		"notification.smtp.password":        "SMTP_PASSWORD",
-		"notification.smtp.from":            "SMTP_FROM",
-		"notification.sms.provider":         "SMS_PROVIDER",
-		"notification.sms.api_key":          "SMS_API_KEY",
-		"notification.sms.from":             "SMS_FROM",
+		"outbox.poll_interval_sec":             "OUTBOX_RELAY_POLL_INTERVAL_SEC",
+		"outbox.max_attempts":                  "OUTBOX_RELAY_MAX_ATTEMPTS",
+		"outbox.batch_size":                    "OUTBOX_RELAY_BATCH_SIZE",
+		"outbox.claim_ttl_sec":                 "OUTBOX_RELAY_CLAIM_TTL_SEC",
+		"outbox.publisher":                     "OUTBOX_PUBLISHER",
+		"outbox.shard_count":                   "OUTBOX_SHARD_COUNT",
+		"outbox.sns_aggregate_version_attr":    "OUTBOX_SNS_AGGREGATE_VERSION_ATTRIBUTE",
+		"outbox.worker_index":                  "RELAY_WORKER_INDEX",
+		"outbox.worker_count":                  "RELAY_WORKER_COUNT",
+		"rate_limit.fallback_multiplier":       "RATE_LIMIT_FALLBACK_MULTIPLIER",
+		"rate_limit.local_max_buckets":         "RATE_LIMIT_LOCAL_MAX_BUCKETS",
+		"rate_limit.health_check_interval_ms":  "RATE_LIMIT_VALKEY_HEALTH_CHECK_INTERVAL_MS",
+		"rate_limit.capacity":                  "RATE_LIMIT_CAPACITY",
+		"rate_limit.refill_per_sec":            "RATE_LIMIT_REFILL_PER_SEC",
+		"gateway.http_timeout_sec":             "GATEWAY_HTTP_TIMEOUT",
+		"gateway.circuit_breaker_threshold":    "CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+		"notification.smtp.host":               "SMTP_HOST",
+		"notification.smtp.port":               "SMTP_PORT",
+		"notification.smtp.username":           "SMTP_USERNAME",
+		"notification.smtp.password":           "SMTP_PASSWORD",
+		"notification.smtp.from":               "SMTP_FROM",
+		"notification.sms.provider":            "SMS_PROVIDER",
+		"notification.sms.api_key":             "SMS_API_KEY",
+		"notification.sms.from":                "SMS_FROM",
 
-		"observability.backend":            "OBSERVABILITY_BACKEND",
-		"observability.log_level":          "LOG_LEVEL",
-		"observability.otlp_endpoint":      "OTLP_ENDPOINT",
-		"observability.otlp_protocol":      "OTLP_PROTOCOL",
-		"security.encryption_key":          "ENCRYPTION_KEY",
-		"security.tls_cert_file":           "TLS_CERT_FILE",
-		"security.tls_key_file":            "TLS_KEY_FILE",
-		"security.tls_ca_file":             "TLS_CA_FILE",
-		"security.cert_refresh_interval_sec": "TLS_CERT_REFRESH_INTERVAL_SECONDS",
-		"security.service_tokens":          "SERVICE_TOKENS",
-		"security.ops_tokens":              "OPS_TOKENS",
-		"jobs.lease_expiry_interval_sec":   "LEASE_EXPIRY_INTERVAL_SECONDS",
+		"observability.backend":                   "OBSERVABILITY_BACKEND",
+		"observability.log_level":                 "LOG_LEVEL",
+		"observability.otlp_endpoint":             "OTLP_ENDPOINT",
+		"observability.otlp_protocol":             "OTLP_PROTOCOL",
+		"security.encryption_key":                 "ENCRYPTION_KEY",
+		"security.tls_cert_file":                  "TLS_CERT_FILE",
+		"security.tls_key_file":                   "TLS_KEY_FILE",
+		"security.tls_ca_file":                    "TLS_CA_FILE",
+		"security.cert_refresh_interval_sec":      "TLS_CERT_REFRESH_INTERVAL_SECONDS",
+		"security.service_tokens":                 "SERVICE_TOKENS",
+		"security.ops_tokens":                     "OPS_TOKENS",
+		"jobs.lease_expiry_interval_sec":          "LEASE_EXPIRY_INTERVAL_SECONDS",
 		"jobs.idempotency_processing_timeout_sec": "LEASE_REAPER_IDEMPOTENCY_TIMEOUT_SEC",
-		"jobs.partition_weeks_ahead":       "PARTITION_WEEKS_AHEAD",
-		"jobs.partition_retention_weeks":   "PARTITION_RETENTION_WEEKS",
-		"jobs.partition_drop_after_days":   "PARTITION_DROP_AFTER_DAYS",
-		"jobs.reconciliation_interval_sec": "RECONCILIATION_INTERVAL_SECONDS",
-		"startup.connect_max_attempts":     "STARTUP_CONNECT_MAX_ATTEMPTS",
-		"startup.connect_attempt_timeout_sec": "STARTUP_CONNECT_ATTEMPT_TIMEOUT",
-		"startup.connect_backoff_sec":      "STARTUP_CONNECT_BACKOFF",
+		"jobs.partition_weeks_ahead":              "PARTITION_WEEKS_AHEAD",
+		"jobs.partition_retention_weeks":          "PARTITION_RETENTION_WEEKS",
+		"jobs.partition_drop_after_days":          "PARTITION_DROP_AFTER_DAYS",
+		"jobs.reconciliation_interval_sec":        "RECONCILIATION_INTERVAL_SECONDS",
+		"startup.connect_max_attempts":            "STARTUP_CONNECT_MAX_ATTEMPTS",
+		"startup.connect_attempt_timeout_sec":     "STARTUP_CONNECT_ATTEMPT_TIMEOUT",
+		"startup.connect_backoff_sec":             "STARTUP_CONNECT_BACKOFF",
 	}
 	for key, envVar := range envBindings {
 		_ = v.BindEnv(key, envVar)
@@ -313,7 +313,7 @@ func LoadConfig() (*Config, error) {
 
 func intSecondsToDurationHook() mapstructure.DecodeHookFuncType {
 	return func(from reflect.Type, to reflect.Type, data any) (any, error) {
-		if to != reflect.TypeOf(time.Duration(0)) {
+		if to != reflect.TypeFor[time.Duration]() {
 			return data, nil
 		}
 		switch v := data.(type) {
@@ -411,7 +411,7 @@ func ParseKeyValues(raw string) map[string]string {
 	if raw == "" {
 		return out
 	}
-	for _, pair := range strings.Split(raw, ",") {
+	for pair := range strings.SplitSeq(raw, ",") {
 		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
 		if len(kv) == 2 && kv[0] != "" {
 			out[kv[0]] = kv[1]

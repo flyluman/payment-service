@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"go.opentelemetry.io/otel"
 
@@ -24,8 +25,8 @@ type Observability struct {
 // Close flushes the telemetry providers in reverse initialization order.
 func (o *Observability) Close(ctx context.Context) error {
 	var firstErr error
-	for i := len(o.closes) - 1; i >= 0; i-- {
-		if err := o.closes[i](ctx); err != nil && firstErr == nil {
+	for _, v := range slices.Backward(o.closes) {
+		if err := v(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

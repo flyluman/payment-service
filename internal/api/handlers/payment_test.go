@@ -19,14 +19,14 @@ import (
 )
 
 type fakeService struct {
-	created      *transaction.Txn
-	verdict      idempotency.Verdict
-	processed    *transaction.Txn
-	fetched      *transaction.Txn
-	createErr    error
-	procErr      error
-	getErr       error
-	token        string
+	created   *transaction.Txn
+	verdict   idempotency.Verdict
+	processed *transaction.Txn
+	fetched   *transaction.Txn
+	createErr error
+	procErr   error
+	getErr    error
+	token     string
 }
 
 func (f *fakeService) Create(ctx context.Context, in payment.CreateInput) (payment.CreateResult, error) {

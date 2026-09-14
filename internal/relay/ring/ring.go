@@ -2,6 +2,7 @@ package ring
 
 import (
 	"hash/fnv"
+	"slices"
 	"sort"
 	"strconv"
 )
@@ -29,11 +30,8 @@ func OwnedShards(workerIndex, workerCount, shardCount int) []int {
 	sets := replicaSets(workerCount, shardCount)
 	owned := make([]int, 0, shardCount)
 	for shard, set := range sets {
-		for _, w := range set {
-			if w == workerIndex {
-				owned = append(owned, shard)
-				break
-			}
+		if slices.Contains(set, workerIndex) {
+			owned = append(owned, shard)
 		}
 	}
 	return owned
@@ -51,24 +49,21 @@ func replicaSets(workerCount, shardCount int) [][]int {
 		return sets
 	}
 
-	rf := ReplicationFactor
-	if rf > workerCount {
-		rf = workerCount
-	}
+	rf := min(ReplicationFactor, workerCount)
 
 	type vnode struct {
 		pos    uint64
 		worker int
 	}
 	ring := make([]vnode, 0, workerCount*vnodesPerWorker)
-	for w := 0; w < workerCount; w++ {
-		for v := 0; v < vnodesPerWorker; v++ {
+	for w := range workerCount {
+		for v := range vnodesPerWorker {
 			ring = append(ring, vnode{pos: hashKey("worker:" + strconv.Itoa(w) + ":vnode:" + strconv.Itoa(v)), worker: w})
 		}
 	}
 	sort.Slice(ring, func(i, j int) bool { return ring[i].pos < ring[j].pos })
 
-	for shard := 0; shard < shardCount; shard++ {
+	for shard := range shardCount {
 		h := hashKey("shard:" + strconv.Itoa(shard))
 		idx := sort.Search(len(ring), func(i int) bool { return ring[i].pos >= h })
 		if idx == len(ring) {

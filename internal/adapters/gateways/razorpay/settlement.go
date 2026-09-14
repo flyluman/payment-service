@@ -45,7 +45,7 @@ func (a *Adapter) FetchSettlementReport(ctx context.Context, tenantID uuid.UUID,
 	var all []rzpPayment
 	var skip int
 
-	for page := 0; page < 100; page++ {
+	for range 100 {
 		q.Set("skip", strconv.Itoa(skip))
 
 		var list rzpPaymentListResponse

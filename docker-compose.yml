@@ -1,20 +1,16 @@
-# Full local stack: Postgres, Valkey, Floci (SNS/SQS/S3), MailHog (SMTP),
-# MockServer (webhook/callback tests), OpenObserve
-# (metrics/observability via an OpenTelemetry Collector relay), and the
-# payment-service (single process running API, relay, and background jobs).
+# Local infra: Postgres, Valkey, db-migrate, db-seed, Floci (SNS/SQS/S3),
+# MailHog (SMTP), MockServer, OpenObserve + otel-collector relay.
+# The payment-service app is NOT started by compose — run it from source
+# (`go run ./cmd/server`) or `docker run` with a built image (see README §31).
 #
 # Usage:
-#   docker compose up --build
+#   docker compose up -d
 #
-# The payment-service publishes outbox events to Floci's SNS topic
-# `payment-events`, which fans out to the `payment-events-consumer` SQS queue
-# (both created by the one-shot `floci-init` service). Inspect events with:
-#   aws sqs receive-message --queue-url http://localhost:4566/000000000000/payment-events-consumer \
-#     --endpoint-url http://localhost:4566
+# Floci-init creates SNS topic `payment-events` and SQS queue `payment-events-consumer`.
+# After running the app with OUTBOX_PUBLISHER=sns, inspect events with:
+#   ./scripts/sqs-tail.sh peek
 #
-# Metrics: the app exports OTLP to `otel-collector` (:4317/:4318), which relays
-# to OpenObserve. Open the UI at http://localhost:5080 (root@example.com /
-# Complexpass#123) and look under the `default` stream.
+# OpenObserve UI: http://localhost:5080 (root@example.com / Complexpass#123)
 
 services:
   postgres:

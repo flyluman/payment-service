@@ -11,8 +11,8 @@ import (
 	"github.com/crownroutes/payment-service/internal/api/middleware"
 	"github.com/crownroutes/payment-service/internal/app/idempotency"
 	apprefund "github.com/crownroutes/payment-service/internal/app/refund"
-	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	domainrefund "github.com/crownroutes/payment-service/internal/domain/refund"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
 )
 
 type RefundService interface {

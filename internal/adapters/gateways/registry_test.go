@@ -62,7 +62,7 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 	r.Register("stripe", stubAdapter{})
 
 	var wg sync.WaitGroup
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		wg.Add(2)
 		go func(i int) {
 			defer wg.Done()

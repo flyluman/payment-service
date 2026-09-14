@@ -131,8 +131,6 @@ func ExtractWebhookSecret(provider Provider, raw json.RawMessage) (string, error
 	}
 }
 
-
-
 // ParseProviderConfig validates and returns the provider-specific config from raw JSON.
 func ParseProviderConfig(provider Provider, raw json.RawMessage) (ProviderConfig, error) {
 	if len(raw) == 0 {

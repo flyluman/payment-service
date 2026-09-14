@@ -11,8 +11,8 @@ import (
 )
 
 type fakeStore struct {
-	inserted  []*notification.Notification
-	pending   []*notification.Notification
+	inserted   []*notification.Notification
+	pending    []*notification.Notification
 	markedSent []uuid.UUID
 	markedFail map[uuid.UUID]string
 	insertErr  error
@@ -189,7 +189,7 @@ func TestProcessQueue_SendsEmailAndMarksSent(t *testing.T) {
 	store := &fakeStore{pending: []*notification.Notification{n}}
 	email := &fakeEmailSender{}
 	s := newTestService(store, &fakeTemplateStore{tmpl: &notification.Template{
-		Subject: "Payment of {{.amount}} received",
+		Subject:  "Payment of {{.amount}} received",
 		BodyText: "You paid {{.amount}}.",
 		BodyHTML: "<p>You paid {{.amount}}.</p>",
 	}}, &fakePreferenceStore{}, email, nil)

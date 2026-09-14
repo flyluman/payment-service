@@ -1,13 +1,8 @@
-# Payment Service — complete configuration reference.
+# Payment Service — default config for local development.
 #
-# Every config key is present below. Non-secret values default to the local
-# docker-compose stack (Postgres, Valkey, Floci SNS, MailHog SMTP, OpenObserve
-# via the otel-collector relay). Sensitive values are left empty here and are
-# provided via environment variables (which take precedence over this file) or
-# the auto-loaded `.env` file. Keep `.env` minimal: secrets only (SERVICE_TOKENS,
-# OPS_TOKENS, DATABASE_PASSWORD, ENCRYPTION_KEY, SMTP/SMS/TLS) plus the AWS SDK
-# vars that are not config-bindable (AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID,
-# AWS_SECRET_ACCESS_KEY). See `.env.example` and README §30 for the reference.
+# Non-secret values target the docker-compose infra stack. Secrets and overrides
+# come from environment variables (see envBindings in config/config.go) or `.env`
+# (copy from .env.example). README §30 lists common local-dev env vars.
 
 app:
   service_name: payment-service

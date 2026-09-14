@@ -73,8 +73,7 @@ func TestTransitionState_InvalidTransitions(t *testing.T) {
 	for _, c := range cases {
 		tx := &Txn{Status: c.from}
 		err := TransitionState(tx, c.to, ActorSystem)
-		var invalid ErrInvalidTransition
-		if !errors.As(err, &invalid) {
+		if _, ok := errors.AsType[ErrInvalidTransition](err); !ok {
 			t.Errorf("%s → %s: expected ErrInvalidTransition, got %v", c.from, c.to, err)
 		}
 		if tx.Status != c.from {
