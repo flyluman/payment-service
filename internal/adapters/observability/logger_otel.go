@@ -8,13 +8,7 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
-// newSlogLoggerOTel builds a logger that writes to stdout AND forwards each
-// record to the given OTLP logger provider (so logs land in OpenObserve).
-//
-// Identity fields (service/version/environment/hostname) are emitted by the
-// OTel resource on the OTLP side (service_name, service_version,
-// deployment_environment, host.name), so they are attached to the stdout
-// handler only to avoid duplicated attributes in log records.
+// newSlogLoggerOTel logs to stdout and OTLP; service identity attrs go on stdout only (OTel resource carries them on export).
 func newSlogLoggerOTel(level slog.Level, svcName, svcVersion, env, hostname string, provider *sdklog.LoggerProvider) *SlogLogger {
 	stdoutHandler := stdoutJSONHandler(level).WithAttrs([]slog.Attr{
 		slog.String("service", svcName),

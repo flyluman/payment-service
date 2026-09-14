@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -78,4 +80,63 @@ func TestIntSecondsToDurationHook_StringSeconds(t *testing.T) {
 	}
 }
 
+const minimalConfigYAML = `app:
+  environment: dev
+observability:
+  log_level: info
+outbox:
+  wal_lag_alert_threshold_mb: 100
+  wal_lag_critical_threshold_mb: 200
+  poll_interval_sec: 5
+  claim_ttl_sec: 30
+  worker_count: 1
+rate_limit:
+  fallback_multiplier: 0.5
+security:
+  service_tokens: test-token=11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222
+`
+
+func TestLoadConfig_CONFIG_PATHCustomFile(t *testing.T) {
+	dir := t.TempDir()
+	defaultPath := filepath.Join(dir, "config.yaml")
+	customPath := filepath.Join(dir, "custom.yaml")
+	if err := os.WriteFile(defaultPath, []byte(minimalConfigYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	custom := strings.Replace(minimalConfigYAML, "environment: dev", "environment: dev\n  service_name: from-custom", 1)
+	if err := os.WriteFile(customPath, []byte(custom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(dir)
+	t.Setenv("CONFIG_PATH", customPath)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.App.ServiceName != "from-custom" {
+		t.Fatalf("service_name = %q, want from-custom", cfg.App.ServiceName)
+	}
+}
+
+func TestLoadConfig_CONFIG_PATHMissingFallsBackToDefault(t *testing.T) {
+	dir := t.TempDir()
+	defaultPath := filepath.Join(dir, "config.yaml")
+	defaultYAML := strings.Replace(minimalConfigYAML, "environment: dev", "environment: dev\n  service_name: from-default", 1)
+	if err := os.WriteFile(defaultPath, []byte(defaultYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(dir)
+	t.Setenv("CONFIG_PATH", filepath.Join(dir, "does-not-exist.yaml"))
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.App.ServiceName != "from-default" {
+		t.Fatalf("service_name = %q, want from-default", cfg.App.ServiceName)
+	}
+}
 

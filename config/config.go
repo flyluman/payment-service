@@ -180,13 +180,28 @@ func LoadConfig() (*Config, error) {
 			// viper cannot infer the config type from an extensionless path.
 			v.SetConfigType("yaml")
 		}
+
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			v.SetConfigName("config")
+			v.SetConfigType("yaml")
+			v.AddConfigPath(".")
+			if err := v.ReadInConfig(); err != nil {
+				return nil, fmt.Errorf("config: read: %w", err)
+			}
+		} else if err != nil {
+			return nil, fmt.Errorf("config: stat %q: %w", configPath, err)
+		} else {
+			if err := v.ReadInConfig(); err != nil {
+				return nil, fmt.Errorf("config: read: %w", err)
+			}
+		}
 	} else {
 		v.SetConfigName("config")
 		v.SetConfigType("yaml")
 		v.AddConfigPath(".")
-	}
-	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf("config: read: %w", err)
+		if err := v.ReadInConfig(); err != nil {
+			return nil, fmt.Errorf("config: read: %w", err)
+		}
 	}
 
 	v.SetDefault("outbox.shard_count", 64)

@@ -1425,79 +1425,19 @@ All API responses use a standard JSON envelope:
 
 ## 30. Configuration
 
-All configuration comes from `config.yaml` with environment variable overrides, loaded and validated in `config/config.go` (`LoadConfig` fails fast with an aggregated list of every missing/invalid value). A `.env` file in the working directory is auto-loaded if present (`godotenv.Load`).
+Configuration loads from `config.yaml` in the working directory unless `CONFIG_PATH` points at another file (extensionless paths are treated as YAML). If `CONFIG_PATH` is set but the file is missing, load falls back to `./config.yaml`. Environment variables override YAML keys after the file is read; see the `envBindings` map in `config/config.go` and examples in `.env.example`. `LoadConfig` validates required fields and fails fast with an aggregated error list. A `.env` file in the working directory is auto-loaded when present (`godotenv.Load`).
 
-### Full environment variable reference
+### Local dev essentials
 
-| Area | Env Var | Config Key | Default | Notes |
-|---|---|---|---|---|
-| App | `SERVICE_NAME` | `app.service_name` | `payment-service` | |
-| App | `ENVIRONMENT` | `app.environment` | — | `prod`, `staging`, or `dev` (required) |
-| App | `SERVICE_VERSION` | `app.service_version` | — | |
-| App | `PORT` | `app.port` | — | HTTP listen port |
-| App | `MTLS_STRICT_MODE` | `app.mtls_strict_mode` | `false` | |
-| Startup | `STARTUP_CONNECT_MAX_ATTEMPTS` | `startup.connect_max_attempts` | — | Retries for DB/Valkey connection |
-| Startup | `STARTUP_CONNECT_ATTEMPT_TIMEOUT` | `startup.connect_attempt_timeout_sec` | — | Per-attempt timeout |
-| Startup | `STARTUP_CONNECT_BACKOFF` | `startup.connect_backoff_sec` | — | Backoff between attempts |
-| Database | `DATABASE_PRIMARY_HOST` | `database.primary_host` | — | Required |
-| Database | `DATABASE_REPLICA_HOST` | `database.replica_host` | — | Optional read replica |
-| Database | `DATABASE_PORT` | `database.port` | `5432` | |
-| Database | `DATABASE_NAME` | `database.name` | — | Required |
-| Database | `DATABASE_USER` | `database.user` | — | Required |
-| Database | `DATABASE_PASSWORD` | `database.password` | — | Required |
-| Database | `DATABASE_SSL_MODE` | `database.ssl_mode` | `disable` | |
-| Database | `DATABASE_MAX_OPEN_CONNS` | `database.max_open_conns` | — | Connection pool |
-| Database | `DATABASE_MAX_IDLE_CONNS` | `database.max_idle_conns` | — | Connection pool |
-| Database | `DATABASE_CONN_MAX_LIFETIME` | `database.conn_max_lifetime_sec` | — | |
-| Database | `DATABASE_CONN_MAX_IDLE_TIME` | `database.conn_max_idle_time_sec` | — | |
-| Database | `DATABASE_HEALTH_CHECK_PERIOD` | `database.health_check_period_sec` | — | |
-| Valkey | `VALKEY_ADDRS` | `valkey.addrs` | — | Comma-separated |
-| Valkey | `VALKEY_RATE_LIMIT_DB` | `valkey.rate_limit_db` | `0` | |
-| Valkey | `VALKEY_CACHE_DB` | `valkey.cache_db` | `1` | |
-| Valkey | `VALKEY_DIAL_TIMEOUT` | `valkey.dial_timeout_sec` | — | |
-| Valkey | `VALKEY_READ_TIMEOUT` | `valkey.read_timeout_sec` | — | |
-| Valkey | `VALKEY_WRITE_TIMEOUT` | `valkey.write_timeout_sec` | — | |
-| Outbox | `OUTBOX_RELAY_BATCH_SIZE` | `outbox.batch_size` | — | |
-| Outbox | `OUTBOX_RELAY_MAX_ATTEMPTS` | `outbox.max_attempts` | `5` | |
-| Outbox | `OUTBOX_RELAY_POLL_INTERVAL_SEC` | `outbox.poll_interval_sec` | — | |
-| Outbox | `OUTBOX_RELAY_CLAIM_TTL_SEC` | `outbox.claim_ttl_sec` | `60` | |
-| Outbox | `OUTBOX_RELAY_WAL_LAG_ALERT_THRESHOLD_MB` | `outbox.wal_lag_alert_threshold_mb` | — | |
-| Outbox | `OUTBOX_RELAY_WAL_LAG_CRITICAL_THRESHOLD_MB` | `outbox.wal_lag_critical_threshold_mb` | — | |
-| Outbox | `OUTBOX_PUBLISHER` | `outbox.publisher` | — | `sns` or empty |
-| Outbox | `OUTBOX_SNS_AGGREGATE_VERSION_ATTRIBUTE` | `outbox.sns_aggregate_version_attr` | `false` | |
-| Outbox | `RELAY_WORKER_INDEX` | `outbox.worker_index` | — | For shard-aware polling |
-| Outbox | `RELAY_WORKER_COUNT` | `outbox.worker_count` | — | |
-| Rate limit | `RATE_LIMIT_CAPACITY` | `rate_limit.capacity` | — | Token bucket size |
-| Rate limit | `RATE_LIMIT_REFILL_PER_SEC` | `rate_limit.refill_per_sec` | — | Refill rate |
-| Rate limit | `RATE_LIMIT_FALLBACK_MULTIPLIER` | `rate_limit.fallback_multiplier` | `0.5` | Local fallback capacity multiplier |
-| Rate limit | `RATE_LIMIT_LOCAL_MAX_BUCKETS` | `rate_limit.local_max_buckets` | — | LRU bound |
-| Rate limit | `RATE_LIMIT_VALKEY_HEALTH_CHECK_INTERVAL_MS` | `rate_limit.health_check_interval_ms` | — | |
-| Gateway | `GATEWAY_HTTP_TIMEOUT` | `gateway.http_timeout_sec` | `30s` | |
-| Gateway | `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `gateway.circuit_breaker_threshold` | — | |
-| Security | `ENCRYPTION_KEY` | `security.encryption_key` | — | Hex-encoded 256-bit key. Required in prod. |
-| Security | `TLS_CERT_FILE` | `security.tls_cert_file` | — | Optional; omit for plain HTTP |
-| Security | `TLS_KEY_FILE` | `security.tls_key_file` | — | |
-| Security | `TLS_CA_FILE` | `security.tls_ca_file` | — | |
-| Security | `TLS_CERT_REFRESH_INTERVAL_SECONDS` | `security.cert_refresh_interval_sec` | — | |
-| Security | `SERVICE_TOKENS` | `security.service_tokens` | — | `token=tenantID:userID,...` |
-| Security | `OPS_TOKENS` | `security.ops_tokens` | — | Comma-separated |
-| Observability | `OBSERVABILITY_BACKEND` | `observability.backend` | `otel` in config.yaml | `otel`/`otlp` (OTLP exporter), `stdout`/`noop` (discard) |
-| Observability | `LOG_LEVEL` | `observability.log_level` | — | `error`, `warn`, `info`, `debug`, `trace` |
-| Observability | `OTLP_ENDPOINT` | `observability.otlp_endpoint` | — | |
-| Observability | `OTLP_PROTOCOL` | `observability.otlp_protocol` | — | |
-| SNS | `SNS_PAYMENT_EVENTS_TOPIC` | `sns.payment_events_topic` | — | |
-| AWS | `AWS_REGION` | `aws.region` | — | |
-| AWS | `AWS_ENDPOINT_URL` | *(not bound — read by the AWS SDK)* | — | Point AWS SDK calls at Floci (e.g. `http://localhost:4566`) for local SNS/SQS testing |
-| AWS | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | *(not bound — read by the AWS SDK)* | — | Any value works with Floci (`test`/`test`) |
-| Notification | `SMTP_HOST` / `SMTP_PORT` | `notification.smtp.host/port` | — | Use `localhost` / `1025` for MailHog |
-| Notification | `SMTP_USERNAME` / `SMTP_PASSWORD` | `notification.smtp.username/password` | — | Empty for MailHog |
-| Notification | `SMTP_FROM` | `notification.smtp.from` | — | Sender address |
-| Jobs | `LEASE_EXPIRY_INTERVAL_SECONDS` | `jobs.lease_expiry_interval_sec` | `60` | |
-| Jobs | `LEASE_REAPER_IDEMPOTENCY_TIMEOUT_SEC` | `jobs.idempotency_processing_timeout_sec` | `300` | |
-| Jobs | `PARTITION_WEEKS_AHEAD` | `jobs.partition_weeks_ahead` | `2` | |
-| Jobs | `PARTITION_RETENTION_WEEKS` | `jobs.partition_retention_weeks` | `2` | |
-| Jobs | `PARTITION_DROP_AFTER_DAYS` | `jobs.partition_drop_after_days` | `14` | |
-| Jobs | `RECONCILIATION_INTERVAL_SECONDS` | `jobs.reconciliation_interval_sec` | `300` | |
+| Env Var | Purpose |
+|---|---|
+| `SERVICE_TOKENS` / `OPS_TOKENS` | API auth (`token=tenantID:userID,...`) — at least one required |
+| `DATABASE_*` / `VALKEY_ADDRS` | Postgres and Valkey (see compose defaults) |
+| `AWS_ENDPOINT_URL` / `AWS_REGION` | Floci SNS/SQS when testing events locally |
+| `OUTBOX_PUBLISHER` / `SNS_PAYMENT_EVENTS_TOPIC` | Publish outbox events to SNS (omit for log-only relay) |
+| `SMTP_HOST` / `SMTP_PORT` | MailHog or real SMTP for notifications |
+| `OBSERVABILITY_BACKEND` / `OTLP_*` | OTLP export (compose wires OpenObserve via collector) |
+| `ENCRYPTION_KEY` | Hex 256-bit key for tenant gateway credentials (required in prod) |
 
 ---
 
@@ -1516,7 +1456,7 @@ SERVICE_TOKENS=test-token=11111111-1111-1111-1111-111111111111:22222222-2222-222
   go run ./cmd/server
 ```
 
-The `payment-service` compose service builds the **multi-stage Dockerfile** (`golang:alpine` build stage → stripped static binary → `scratch` runtime with CA certs and a non-root user). `config.yaml` is mounted read-only at `/app/config.yaml` — the `CONFIG_PATH` env var is broken, so the config file must be in the working directory. Overrides for the compose-run service (DB host, Valkey, SNS publisher, SMTP) come via environment in `docker-compose.yml`.
+The `payment-service` compose service builds the **multi-stage Dockerfile** (`golang:alpine` build stage → stripped static binary → `scratch` runtime with CA certs and a non-root user). Compose mounts `config.yaml` at `/app/config.yaml` (or set `CONFIG_PATH` to that path). Overrides for DB, Valkey, SNS, and SMTP come from environment in `docker-compose.yml`.
 
 ### Docker image
 
@@ -1579,13 +1519,6 @@ open http://localhost:5080            # root@example.com / Complexpass#123
 # OTLP_ENDPOINT=http://localhost:4318 (or :4317 gRPC), OTLP_PROTOCOL=http/protobuf.
 # Metrics land under the `default` stream ~10s after the first request.
 
-# Quick sanity check — push a metric straight through the collector and view it:
-# (requires the collector's OTLP HTTP receiver; auth is injected by the relay)
-curl -s http://localhost:4318/v1/metrics \
-  -H 'Content-Type: application/x-protobuf' \
-  --data-binary @- <<'EOF'
-<OTLP/HTTP metrics protobuf payload>
-EOF
 ```
 
 Notes:
