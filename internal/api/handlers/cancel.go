@@ -7,9 +7,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/crownroutes/payment-service/internal/api/middleware"
 	appcancel "github.com/crownroutes/payment-service/internal/app/cancel"
 	"github.com/crownroutes/payment-service/internal/app/idempotency"
-	"github.com/crownroutes/payment-service/internal/api/middleware"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
 )
 
@@ -58,6 +58,10 @@ func (h *CancelHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, idempotency.ErrKeyRequired) {
 			writeError(w, r, http.StatusBadRequest, "missing_idempotency_key", "Idempotency-Key header is required")
+			return
+		}
+		if errors.Is(err, appcancel.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "payment not found")
 			return
 		}
 		writeError(w, r, http.StatusInternalServerError, "cancel_failed", "could not process cancellation")

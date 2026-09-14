@@ -69,7 +69,7 @@ func NewRateLimiter(c *Client, cfg config.RateLimitConfig, logger ports.Logger, 
 		stopHealth:       make(chan struct{}),
 	}
 
-	interval := cfg.HealthCheckInterval
+	interval := time.Duration(cfg.HealthCheckIntervalMS) * time.Millisecond
 	if interval <= 0 {
 		interval = defaultHealthCheckInterval
 	}

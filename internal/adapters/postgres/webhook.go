@@ -31,7 +31,7 @@ ON CONFLICT (event_id, gateway_id) DO NOTHING`, eventID, gatewayID)
 func (r *WebhookRepository) GetGatewayMetadata(ctx context.Context, transactionID uuid.UUID) ([]byte, error) {
 	var payload string
 	err := r.db.ReadPool().QueryRow(ctx,
-		`SELECT metadata FROM transaction_gateway_metadata WHERE transaction_id = $1 ORDER BY id DESC LIMIT 1`,
+		`SELECT metadata FROM transaction_gateway_metadata WHERE transaction_id = $1 ORDER BY captured_at DESC LIMIT 1`,
 		transactionID,
 	).Scan(&payload)
 	if err != nil {

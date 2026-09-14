@@ -26,7 +26,7 @@ func New(ctx context.Context, cfg config.DatabaseConfig) (*DB, error) {
 	poolCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	poolCfg.MaxConns = int32(cfg.MaxOpenConns)
-	poolCfg.MinConns = int32(cfg.MaxIdleConns)
+	poolCfg.MinConns = 0
 	poolCfg.MaxConnLifetime = cfg.ConnMaxLifetime
 	poolCfg.MaxConnIdleTime = cfg.ConnMaxIdleTime
 	poolCfg.HealthCheckPeriod = cfg.HealthCheckPeriod
@@ -53,7 +53,7 @@ func New(ctx context.Context, cfg config.DatabaseConfig) (*DB, error) {
 		}
 		replicaCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 		replicaCfg.MaxConns = int32(cfg.MaxOpenConns)
-		replicaCfg.MinConns = int32(cfg.MaxIdleConns)
+		replicaCfg.MinConns = 0
 		replicaCfg.MaxConnLifetime = cfg.ConnMaxLifetime
 		replicaCfg.MaxConnIdleTime = cfg.ConnMaxIdleTime
 		replicaCfg.HealthCheckPeriod = cfg.HealthCheckPeriod
@@ -74,7 +74,7 @@ func New(ctx context.Context, cfg config.DatabaseConfig) (*DB, error) {
 	return db, nil
 }
 
-func (db *DB) Pool() *pgxpool.Pool            { return db.pool }
+func (db *DB) Pool() *pgxpool.Pool { return db.pool }
 func (db *DB) ReadPool() *pgxpool.Pool {
 	if db.read != nil {
 		return db.read

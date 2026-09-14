@@ -29,12 +29,11 @@ func (s *AuditLogStore) WriteEntry(ctx context.Context, entry *ports.AuditEntry)
 	}
 
 	_, err := s.db.Pool().Exec(ctx,
-		`INSERT INTO audit_log (id, transaction_id, event_type, actor, actor_type, previous_state, new_state, reason, metadata)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		`INSERT INTO audit_log (id, transaction_id, event_type, actor, previous_state, new_state, reason, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		entry.ID,
 		entry.TransactionID,
 		entry.EventType,
-		entry.Actor,
 		entry.Actor,
 		entry.PreviousState,
 		entry.NewState,

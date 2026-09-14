@@ -39,24 +39,25 @@ func NewPaymentHandler(svc PaymentService) *PaymentHandler {
 }
 
 type createPaymentRequest struct {
-	GatewayID      string         `json:"gateway_id"`
-	Amount         int64          `json:"amount"`
-	Currency       string         `json:"currency"`
-	PaymentMethod  string         `json:"payment_method"`
-	CaptureMode    string         `json:"capture_mode,omitempty"`
-	CustomerID     string         `json:"customer_id,omitempty"`
-	CustomerEmail  string         `json:"customer_email,omitempty"`
-	Description    string         `json:"description,omitempty"`
-	Metadata       map[string]any `json:"metadata,omitempty"`
-	CallbackURL    string         `json:"callback_url"`
-	RedirectURL    string         `json:"redirect_url"`
+	GatewayID     string         `json:"gateway_id"`
+	Amount        int64          `json:"amount"`
+	Currency      string         `json:"currency"`
+	PaymentMethod string         `json:"payment_method"`
+	CaptureMode   string         `json:"capture_mode,omitempty"`
+	CustomerID    string         `json:"customer_id,omitempty"`
+	CustomerEmail string         `json:"customer_email,omitempty"`
+	Description   string         `json:"description,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	CallbackURL   string         `json:"callback_url"`
+	RedirectURL   string         `json:"redirect_url"`
 }
 
 type createPaymentResponse struct {
-	TransactionID string `json:"transaction_id"`
-	Token         string `json:"token"`
-	Status        string `json:"status"`
-	FeeBreakdown  any    `json:"fee_breakdown,omitempty"`
+	TransactionID   string         `json:"transaction_id"`
+	Token           string         `json:"token"`
+	Status          string         `json:"status"`
+	GatewayMetadata map[string]any `json:"gateway_metadata,omitempty"`
+	FeeBreakdown    any            `json:"fee_breakdown,omitempty"`
 }
 
 type paymentResponse struct {
@@ -172,19 +173,29 @@ func (h *PaymentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	switch result.Verdict {
 	case idempotency.Created:
 		statusCode := http.StatusCreated
-		writeJSON(w, r, statusCode, createPaymentResponse{
+		resp := createPaymentResponse{
 			TransactionID: result.Transaction.ID.String(),
 			Token:         result.Token,
 			Status:        string(result.Transaction.Status),
 			FeeBreakdown:  result.Transaction.FeeBreakdown,
-		})
+		}
+		meta, _ := h.svc.GetGatewayMetadata(r.Context(), result.Transaction.ID)
+		if meta != nil {
+			resp.GatewayMetadata = meta
+		}
+		writeJSON(w, r, statusCode, resp)
 	case idempotency.Replayed:
-		writeJSON(w, r, http.StatusOK, createPaymentResponse{
+		resp := createPaymentResponse{
 			TransactionID: result.Transaction.ID.String(),
 			Token:         result.Token,
 			Status:        string(result.Transaction.Status),
 			FeeBreakdown:  result.Transaction.FeeBreakdown,
-		})
+		}
+		meta, _ := h.svc.GetGatewayMetadata(r.Context(), result.Transaction.ID)
+		if meta != nil {
+			resp.GatewayMetadata = meta
+		}
+		writeJSON(w, r, http.StatusOK, resp)
 	case idempotency.InProgress:
 		writeError(w, r, http.StatusConflict, "idempotency_in_progress", "a request with this idempotency key is already in progress")
 	case idempotency.KeyReused:
@@ -383,8 +394,8 @@ func (h *PaymentHandler) List(w http.ResponseWriter, r *http.Request) {
 		data = append(data, item)
 	}
 	writeJSON(w, r, http.StatusOK, map[string]any{
-		"data":       data,
-		"has_more":   result.HasMore,
+		"data":        data,
+		"has_more":    result.HasMore,
 		"next_cursor": result.NextCursor,
 	})
 }

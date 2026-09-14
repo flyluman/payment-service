@@ -15,6 +15,7 @@ type MismatchType string
 type Job struct {
 	ID            uuid.UUID
 	GatewayID     string
+	TenantID      *uuid.UUID
 	TransactionID *uuid.UUID
 	PeriodStart   *time.Time
 	PeriodEnd     *time.Time
@@ -119,7 +120,10 @@ func (e *Entry) EligibleForAutoResolution(cfg AutoResolutionConfig) (bool, strin
 		return false, "gateway amount is zero, cannot compute percentage"
 	}
 
-	pctCheck := discrepancy*10000 <= int64(cfg.ThresholdBPS)*settledAmount
+	// Compare discrepancy*10000 <= ThresholdBPS*settledAmount without overflow:
+	// discrepancy <= floor(settledAmount*ThresholdBPS/10000).
+	threshold := int64(cfg.ThresholdBPS)
+	pctCheck := discrepancy <= (settledAmount/10000)*threshold+(settledAmount%10000)*threshold/10000
 	absCheck := discrepancy <= cfg.AbsoluteCapPaise
 
 	if !pctCheck {

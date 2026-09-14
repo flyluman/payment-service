@@ -9,9 +9,9 @@ import (
 	"github.com/crownroutes/payment-service/config"
 	"github.com/crownroutes/payment-service/internal/adapters/callback"
 	"github.com/crownroutes/payment-service/internal/adapters/initiator"
-	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	"github.com/crownroutes/payment-service/internal/adapters/observability"
 	"github.com/crownroutes/payment-service/internal/adapters/outbox"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	refundinitiator "github.com/crownroutes/payment-service/internal/adapters/refundinitiator"
 	"github.com/crownroutes/payment-service/internal/adapters/sns"
 	"github.com/crownroutes/payment-service/internal/app/payment"
@@ -103,9 +103,9 @@ func buildPublisher(ctx context.Context, cfg *config.Config, logger *observabili
 	})
 
 	return outbox.NewRouter(
-		outbox.Route{EventType: "*", Handler: baseHandler},
 		outbox.Route{EventType: ports.EventTypeTransactionCallback, Handler: cbDispatcher},
 		outbox.Route{EventType: ports.EventTypeGatewayInitiate, Handler: initiatorHandler},
 		outbox.Route{EventType: ports.EventTypeRefundInitiated, Handler: refundInitHandler},
+		outbox.Route{EventType: "*", Handler: baseHandler},
 	), nil
 }

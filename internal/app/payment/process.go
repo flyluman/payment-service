@@ -11,6 +11,12 @@ import (
 	"github.com/crownroutes/payment-service/internal/ports"
 )
 
+// ProcessPayment drives a pending transaction through gateway initiation using
+// a transaction-scoped lease. Note: the production trigger for gateway calls is
+// the outbox relay routing GATEWAY_INITIATE events into ProcessGatewayInitiate
+// (which uses TryAcquireDirect). This method is exercised directly by the
+// integration suite as the equivalent driver and is kept as the canonical
+// Acquire-in-transaction path.
 func (s *Service) ProcessPayment(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
 	txn, err := s.repo.GetByID(ctx, transactionID)
 	if err != nil {
@@ -106,5 +112,3 @@ func (s *Service) RecoverExpiredLease(ctx context.Context, transactionID uuid.UU
 	})
 	return s.finalize(ctx, txn, resp, result)
 }
-
-

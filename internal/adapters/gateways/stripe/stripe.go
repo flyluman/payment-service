@@ -104,7 +104,7 @@ func (a *Adapter) InitiatePayment(ctx context.Context, req ports.GatewayPaymentR
 }
 
 func (a *Adapter) CheckStatus(ctx context.Context, req ports.GatewayStatusRequest) (*ports.GatewayPaymentResponse, error) {
-	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	tc, err := a.resolveTenant(ctx, req.TenantID, req.TransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func (a *Adapter) CheckStatus(ctx context.Context, req ports.GatewayStatusReques
 }
 
 func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*ports.GatewayRefundResponse, error) {
-	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	tc, err := a.resolveTenant(ctx, req.TenantID, req.TransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*
 }
 
 func (a *Adapter) Cancel(ctx context.Context, req ports.GatewayCancelRequest) (*ports.GatewayCancelResponse, error) {
-	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	tc, err := a.resolveTenant(ctx, req.TenantID, req.TransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -177,15 +177,23 @@ func (a *Adapter) CapturePayment(ctx context.Context, req ports.GatewayCaptureRe
 	}
 }
 
-func (a *Adapter) resolveForTxn(ctx context.Context, txnID uuid.UUID) (*TenantConfig, error) {
-	v, ok := a.txnTenants.Load(txnID)
-	if !ok {
-		return nil, &ports.GatewayError{
-			Category: ports.ErrorCategoryGatewayError, Code: "tenant_not_cached",
-			GatewayMessage: fmt.Sprintf("tenant for transaction %s not found", txnID),
+// resolveTenant returns the tenant config for a transaction, preferring an explicit
+// tenantID supplied in the request (survives process restarts) and falling back to
+// the in-memory txn→tenant mapping populated during InitiatePayment.
+func (a *Adapter) resolveTenant(ctx context.Context, tenantID uuid.UUID, txnID uuid.UUID) (*TenantConfig, error) {
+	if tenantID == uuid.Nil {
+		v, ok := a.txnTenants.Load(txnID)
+		if !ok {
+			return nil, &ports.GatewayError{
+				Category: ports.ErrorCategoryGatewayError, Code: "tenant_not_cached",
+				GatewayMessage: fmt.Sprintf("tenant for transaction %s not found", txnID),
+			}
 		}
+		tenantID = v.(uuid.UUID)
+	} else {
+		a.txnTenants.Store(txnID, tenantID)
 	}
-	return a.resolve(ctx, v.(uuid.UUID))
+	return a.resolve(ctx, tenantID)
 }
 
 func (a *Adapter) do(ctx context.Context, tc *TenantConfig, method, path string, form url.Values, idemKey string, out any) error {
@@ -273,7 +281,7 @@ func (a *Adapter) toPaymentResponse(ctx context.Context, pi *stripePaymentIntent
 		Amount:             pi.Amount,
 		Currency:           strings.ToUpper(pi.Currency),
 		ClientSecret:       pi.ClientSecret,
-		GatewayMetadata: rawMeta,
+		GatewayMetadata:    rawMeta,
 	}
 	if pi.LastPaymentError != nil {
 		resp.ErrorCode = firstNonEmpty(pi.LastPaymentError.DeclineCode, pi.LastPaymentError.Code)
@@ -288,7 +296,7 @@ func (a *Adapter) toPaymentResponse(ctx context.Context, pi *stripePaymentIntent
 		}
 		resp.NextAction = na
 		rawMeta["next_action"] = map[string]any{
-			"type":        na.Type,
+			"type":         na.Type,
 			"redirect_url": na.RedirectURL,
 		}
 	}

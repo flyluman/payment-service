@@ -45,7 +45,10 @@ func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret st
 
 	eventID := headers["X-Razorpay-Event-Id"]
 	if eventID == "" {
-		eventID = payment.ID
+		// Fall back to a composite keyed by event type so distinct events for
+		// the same payment (authorized, captured, failed) don't collide and get
+		// dropped by the webhook dedup table.
+		eventID = payment.ID + ":" + wh.Event
 	}
 
 	meta := map[string]any{}
@@ -69,7 +72,7 @@ func mapWebhookPaymentStatus(s string) ports.GatewayPaymentStatus {
 	case "failed":
 		return ports.GatewayPaymentStatusFailed
 	case "authorized":
-		return ports.GatewayPaymentStatusProcessing
+		return ports.GatewayPaymentStatusAuthorized
 	default:
 		return ports.GatewayPaymentStatusPending
 	}

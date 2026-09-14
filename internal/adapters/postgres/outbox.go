@@ -30,7 +30,7 @@ type TenantWebhookWriter struct {
 }
 
 var (
-	_ ports.OutboxWriter          = (*OutboxWriter)(nil)
+	_ ports.OutboxWriter        = (*OutboxWriter)(nil)
 	_ ports.TenantWebhookWriter = (*TenantWebhookWriter)(nil)
 )
 
@@ -175,9 +175,9 @@ VALUES
 
 		if w.log != nil {
 			w.log.Error(ports.LogEventOutboxDeadLetter, map[string]any{
-				"event_id":      id,
-				"event_type":    event.EventType,
-				"aggregate_id":  event.AggregateID,
+				"event_id":       id,
+				"event_type":     event.EventType,
+				"aggregate_id":   event.AggregateID,
 				"aggregate_type": event.AggregateType,
 				"failure_reason": lastErr,
 			}, nil)
@@ -235,7 +235,7 @@ RETURNING o.id, o.aggregate_id, o.aggregate_type, o.event_type,
 	return events, rows.Err()
 }
 
-func (w *OutboxWriter) ReplayDeadLetter(ctx context.Context, deadLetterID uuid.UUID, actor, reason string) (uuid.UUID, error) {
+func (w *OutboxWriter) ReplayDeadLetter(ctx context.Context, tenantID, deadLetterID uuid.UUID, actor, reason string) (uuid.UUID, error) {
 	newEventID := uuid.Must(uuid.NewV7())
 
 	err := withTx(ctx, w.db.pool, func(tx pgx.Tx) error {
@@ -260,6 +260,16 @@ WHERE id = $1`, deadLetterID).Scan(
 		}
 		if dl.ResolvedAt != nil {
 			return fmt.Errorf("outbox: dead letter %s already resolved", deadLetterID)
+		}
+
+		if tenantID != uuid.Nil {
+			ok, err := deadLetterOwnedByTenant(ctx, tx, dl.AggregateID, tenantID)
+			if err != nil {
+				return fmt.Errorf("outbox: check dead letter %s tenant: %w", deadLetterID, err)
+			}
+			if !ok {
+				return fmt.Errorf("outbox: dead letter %s not found", deadLetterID)
+			}
 		}
 
 		shard := ShardIndex(dl.AggregateID, w.shardCount)
@@ -290,37 +300,44 @@ WHERE id = $1`, deadLetterID, actor)
 
 func (w *OutboxWriter) ListDeadLetters(ctx context.Context, filter ports.DeadLetterFilter) ([]ports.DeadLetter, error) {
 	query := `
-		SELECT id, aggregate_id, aggregate_type, event_type, payload, event_version, aggregate_version,
-		       COALESCE(error_message, failure_reason), attempts, COALESCE(created_at, failed_at), resolved_at, resolved_by
-		FROM outbox_dead_letters WHERE 1=1
+		SELECT d.id, d.aggregate_id, d.aggregate_type, d.event_type, d.payload, d.event_version, d.aggregate_version,
+		       d.failure_reason, d.failed_at, d.resolved_at, d.resolved_by
+		FROM outbox_dead_letters d
+		LEFT JOIN transactions t ON t.id = d.aggregate_id
+		WHERE 1=1
 	`
 	args := []any{}
 	argIdx := 1
 
+	if filter.TenantID != uuid.Nil {
+		query += " AND t.tenant_id = $" + strconv.Itoa(argIdx)
+		args = append(args, filter.TenantID)
+		argIdx++
+	}
 	if filter.Resolved != nil {
 		if *filter.Resolved {
-			query += " AND resolved_at IS NOT NULL"
+			query += " AND d.resolved_at IS NOT NULL"
 		} else {
-			query += " AND resolved_at IS NULL"
+			query += " AND d.resolved_at IS NULL"
 		}
 	}
 	if filter.EventType != nil {
-		query += " AND event_type = $" + strconv.Itoa(argIdx)
+		query += " AND d.event_type = $" + strconv.Itoa(argIdx)
 		args = append(args, *filter.EventType)
 		argIdx++
 	}
 	if filter.DateFrom != nil {
-		query += " AND created_at >= $" + strconv.Itoa(argIdx)
+		query += " AND d.failed_at >= $" + strconv.Itoa(argIdx)
 		args = append(args, *filter.DateFrom)
 		argIdx++
 	}
 	if filter.DateTo != nil {
-		query += " AND created_at <= $" + strconv.Itoa(argIdx)
+		query += " AND d.failed_at <= $" + strconv.Itoa(argIdx)
 		args = append(args, *filter.DateTo)
 		argIdx++
 	}
 
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY d.failed_at DESC"
 
 	limit := filter.Limit
 	if limit <= 0 || limit > 100 {
@@ -340,7 +357,7 @@ func (w *OutboxWriter) ListDeadLetters(ctx context.Context, filter ports.DeadLet
 		var dl ports.DeadLetter
 		if err := rows.Scan(&dl.ID, &dl.AggregateID, &dl.AggregateType, &dl.EventType,
 			&dl.Payload, &dl.EventVersion, &dl.AggregateVersion,
-			&dl.ErrorMessage, &dl.Attempts, &dl.CreatedAt, &dl.ResolvedAt, &dl.ResolvedBy); err != nil {
+			&dl.FailureReason, &dl.FailedAt, &dl.ResolvedAt, &dl.ResolvedBy); err != nil {
 			return nil, err
 		}
 		letters = append(letters, dl)
@@ -354,6 +371,21 @@ func (w *OutboxWriter) ListDeadLetters(ctx context.Context, filter ports.DeadLet
 	}
 
 	return letters, nil
+}
+
+// deadLetterOwnedByTenant reports whether the given aggregate (transaction)
+// belongs to tenantID. Returns false if the aggregate is not a transaction or
+// has no matching row.
+func deadLetterOwnedByTenant(ctx context.Context, q Queryer, aggregateID uuid.UUID, tenantID uuid.UUID) (bool, error) {
+	var owner uuid.UUID
+	err := q.QueryRow(ctx, `SELECT tenant_id FROM transactions WHERE id = $1`, aggregateID).Scan(&owner)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return owner == tenantID, nil
 }
 
 func (w *TenantWebhookWriter) WriteDelivery(ctx context.Context, d ports.TenantWebhookDelivery) error {

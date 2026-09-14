@@ -44,12 +44,16 @@ func RequestLog(log ports.Logger) func(http.Handler) http.Handler {
 			}
 
 			next.ServeHTTP(rw, r)
-			log.Info("http.request", map[string]any{
-				"method":      r.Method,
-				"path":        r.URL.Path,
-				"query":       sanitizeQuery(r.URL.RawQuery),
-				"status":      rw.status,
-				"duration_ms": time.Since(start).Milliseconds(),
+			ctxLog := log
+			if ctxReqLog := LoggerFromContext(ctx); ctxReqLog != nil {
+				ctxLog = ctxReqLog
+			}
+			ctxLog.Info("http.request", map[string]any{
+				"method":             r.Method,
+				"path":               r.URL.Path,
+				"query":              sanitizeQuery(r.URL.RawQuery),
+				"status":             rw.status,
+				"duration_ms":        time.Since(start).Milliseconds(),
 				ports.FieldRequestID: reqID,
 				ports.FieldTraceID:   trcID,
 			})

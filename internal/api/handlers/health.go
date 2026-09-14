@@ -3,7 +3,10 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"time"
 )
+
+const healthCheckTimeout = 2 * time.Second
 
 type Pinger interface {
 	Ping(ctx context.Context) error
@@ -28,7 +31,10 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	healthy := true
 
 	for _, c := range h.checks {
-		if err := c.Pinger.Ping(r.Context()); err != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), healthCheckTimeout)
+		err := c.Pinger.Ping(ctx)
+		cancel()
+		if err != nil {
 			components[c.Name] = "unhealthy"
 			healthy = false
 		} else {

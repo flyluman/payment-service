@@ -1,6 +1,8 @@
 package fib
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -15,8 +17,9 @@ func TestParseWebhook_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if ev.EventID != "fib_pay_123" {
-		t.Errorf("expected event id fib_pay_123, got %s", ev.EventID)
+	sum := sha256.Sum256(body)
+	if ev.EventID != hex.EncodeToString(sum[:]) {
+		t.Errorf("expected body-hash event id, got %s", ev.EventID)
 	}
 	if ev.GatewayReferenceID != "fib_pay_123" {
 		t.Errorf("expected reference fib_pay_123, got %s", ev.GatewayReferenceID)
@@ -36,7 +39,7 @@ func TestParseWebhook_Paid(t *testing.T) {
 		{"PAID", ports.GatewayPaymentStatusSucceeded},
 		{"DECLINED", ports.GatewayPaymentStatusFailed},
 		{"CANCELLED", ports.GatewayPaymentStatusCancelled},
-		{"REFUNDED", ports.GatewayPaymentStatusFailed},
+		{"REFUNDED", ports.GatewayPaymentStatusRefunded},
 		{"UNKNOWN", ports.GatewayPaymentStatusProcessing},
 	}
 	for _, tt := range tests {
@@ -83,7 +86,34 @@ func TestParseWebhook_FallbackPaymentID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if ev.EventID != "fib_pay_456" {
-		t.Errorf("expected fib_pay_456, got %s", ev.EventID)
+	sum := sha256.Sum256(body)
+	if ev.EventID != hex.EncodeToString(sum[:]) {
+		t.Errorf("expected body-hash event id, got %s", ev.EventID)
+	}
+	if ev.GatewayReferenceID != "fib_pay_456" {
+		t.Errorf("expected reference fib_pay_456, got %s", ev.GatewayReferenceID)
+	}
+}
+
+// Distinct bodies must yield distinct event ids so later FIB callbacks for the
+// same payment aren't dropped by the webhook dedup.
+func TestParseWebhook_EventIDVariesWithStatus(t *testing.T) {
+	a := New(Config{})
+	paid := []byte(`{"id":"fib_pay_9","paymentId":"fib_pay_9","status":"PAID"}`)
+	refunded := []byte(`{"id":"fib_pay_9","paymentId":"fib_pay_9","status":"REFUNDED"}`)
+
+	paidEv, err := a.ParseWebhook(paid, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	refundedEv, err := a.ParseWebhook(refunded, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if paidEv.EventID == refundedEv.EventID {
+		t.Errorf("expected distinct event ids for different payloads, got %s", paidEv.EventID)
+	}
+	if paidEv.GatewayReferenceID != refundedEv.GatewayReferenceID {
+		t.Errorf("reference should be stable across payloads, got %s vs %s", paidEv.GatewayReferenceID, refundedEv.GatewayReferenceID)
 	}
 }

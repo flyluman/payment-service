@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
+	appwebhook "github.com/crownroutes/payment-service/internal/app/webhook"
 	"github.com/crownroutes/payment-service/internal/domain/gateway"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
-	appwebhook "github.com/crownroutes/payment-service/internal/app/webhook"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
 
@@ -26,12 +27,14 @@ func (noopLog) Trace(string, map[string]any)        {}
 func (l noopLog) With(map[string]any) ports.Logger  { return l }
 
 type fakeWebhookProcessor struct {
-	calls   int
-	outcome appwebhook.Outcome
+	calls      int
+	lastStatus ports.GatewayPaymentStatus
+	outcome    appwebhook.Outcome
 }
 
-func (f *fakeWebhookProcessor) Process(context.Context, string, appwebhook.Event, []byte) (appwebhook.Outcome, error) {
+func (f *fakeWebhookProcessor) Process(_ context.Context, _ string, ev appwebhook.Event, _ []byte) (appwebhook.Outcome, error) {
 	f.calls++
+	f.lastStatus = ports.GatewayPaymentStatus(ev.Status)
 	return f.outcome, nil
 }
 
@@ -45,12 +48,23 @@ func (f fakeWebhookParser) ParseWebhook([]byte, map[string]string, string) (*por
 }
 
 type fakeWebhookResolver struct {
-	parser ports.GatewayWebhookParser
-	ok     bool
+	parser     ports.GatewayWebhookParser
+	ok         bool
+	refetch    bool
+	statusResp *ports.GatewayPaymentResponse
+	statusErr  error
 }
 
 func (f fakeWebhookResolver) WebhookParser(string) (ports.GatewayWebhookParser, bool) {
 	return f.parser, f.ok
+}
+
+func (f fakeWebhookResolver) WebhookRequiresRefetch(string) bool {
+	return f.refetch
+}
+
+func (f fakeWebhookResolver) CheckStatus(context.Context, string, ports.GatewayStatusRequest) (*ports.GatewayPaymentResponse, error) {
+	return f.statusResp, f.statusErr
 }
 
 type fakeWebhookTxnRepo struct {
@@ -58,6 +72,10 @@ type fakeWebhookTxnRepo struct {
 }
 
 func (f fakeWebhookTxnRepo) GetByID(_ context.Context, _ uuid.UUID) (*transaction.Txn, error) {
+	return f.txn, nil
+}
+
+func (f fakeWebhookTxnRepo) GetByGatewayReference(_ context.Context, _, _ string) (*transaction.Txn, error) {
 	return f.txn, nil
 }
 
@@ -161,6 +179,64 @@ func TestWebhook_UnknownGateway404(t *testing.T) {
 	rec := postWebhookV2(h, "mystery", txn.ID.String())
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unregistered gateway, got %d", rec.Code)
+	}
+}
+
+func TestWebhook_UnsignedGatewayRefetchesStatus(t *testing.T) {
+	proc := &fakeWebhookProcessor{outcome: appwebhook.Outcome{Resolved: true}}
+	txn := validTxn()
+
+	// Webhook claims the payment SUCCEEDED, but the authoritative status is FAILED.
+	// The unsigned-gateway path must re-fetch and use the authoritative status.
+	authoritative := &ports.GatewayPaymentResponse{
+		GatewayReferenceID: "ref_1",
+		Status:             ports.GatewayPaymentStatusFailed,
+	}
+	resolver := fakeWebhookResolver{
+		parser:     fakeWebhookParser{event: okEvent()},
+		ok:         true,
+		refetch:    true,
+		statusResp: authoritative,
+	}
+	h := NewWebhookHandler(proc, resolver, fakeWebhookTxnRepo{txn: txn}, fakeWebhookTenantStore{cfg: fibConfig()}, nil, noopLog{})
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/gateway/fib", strings.NewReader(`raw`))
+	req.SetPathValue("gateway_id", "fib")
+	rec := httptest.NewRecorder()
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if proc.calls != 1 {
+		t.Fatalf("expected 1 processor call, got %d", proc.calls)
+	}
+	if got := proc.lastStatus; got != "failed" {
+		t.Errorf("expected authoritative status failed to reach processor, got %s", got)
+	}
+}
+
+func TestWebhook_UnsignedGatewayRefetchFailure500(t *testing.T) {
+	proc := &fakeWebhookProcessor{}
+	txn := validTxn()
+	resolver := fakeWebhookResolver{
+		parser:    fakeWebhookParser{event: okEvent()},
+		ok:        true,
+		refetch:   true,
+		statusErr: errors.New("gateway down"),
+	}
+	h := NewWebhookHandler(proc, resolver, fakeWebhookTxnRepo{txn: txn}, fakeWebhookTenantStore{cfg: fibConfig()}, nil, noopLog{})
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/gateway/fib", strings.NewReader(`raw`))
+	req.SetPathValue("gateway_id", "fib")
+	rec := httptest.NewRecorder()
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on refetch failure, got %d", rec.Code)
+	}
+	if proc.calls != 0 {
+		t.Error("processor must not run when status cannot be verified")
 	}
 }
 

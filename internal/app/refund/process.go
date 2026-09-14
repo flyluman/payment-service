@@ -29,6 +29,9 @@ type refundOutcome struct {
 	failureReason *refund.FailureReason
 }
 
+// ProcessRefund drives a newly initiated refund through the gateway. It is
+// called by the relay on REFUND_INITIATED events and is safe against event
+// redelivery: a refund already past REFUND_INITIATED is returned untouched.
 func (s *Service) ProcessRefund(ctx context.Context, refundID uuid.UUID) (*refund.Refund, error) {
 	rf, err := s.refunds.GetByID(ctx, refundID)
 	if err != nil {
@@ -37,7 +40,23 @@ func (s *Service) ProcessRefund(ctx context.Context, refundID uuid.UUID) (*refun
 	if rf.Status != refund.StatusInitiated {
 		return rf, nil
 	}
+	return s.runRefund(ctx, rf)
+}
 
+// RetryStaleRefund re-drives a refund the relay left in REFUND_PROCESSING
+// (ambiguous or timed-out gateway response). Called by the refund reaper.
+func (s *Service) RetryStaleRefund(ctx context.Context, refundID uuid.UUID) (*refund.Refund, error) {
+	rf, err := s.refunds.GetByID(ctx, refundID)
+	if err != nil {
+		return nil, fmt.Errorf("refund: load refund %s: %w", refundID, err)
+	}
+	if rf.Status != refund.StatusProcessing {
+		return rf, nil
+	}
+	return s.runRefund(ctx, rf)
+}
+
+func (s *Service) runRefund(ctx context.Context, rf *refund.Refund) (*refund.Refund, error) {
 	parent, err := s.txns.GetByID(ctx, rf.TransactionID)
 	if err != nil {
 		return nil, fmt.Errorf("refund: load parent %s: %w", rf.TransactionID, err)
@@ -48,14 +67,18 @@ func (s *Service) ProcessRefund(ctx context.Context, refundID uuid.UUID) (*refun
 		return nil, fmt.Errorf("refund: resolve adapter for %s: %w", rf.AttemptedGateway, err)
 	}
 
-	if err := s.tx.WithinTx(ctx, func(ctx context.Context) error {
-		if err := rf.Transition(refund.StatusProcessing); err != nil {
-			return err
+	// Atomically claim the refund. Only one caller (relay or reaper) wins; the
+	// loser reloads and returns the current state without touching the gateway.
+	claimed, err := s.refunds.ClaimProcessing(ctx, rf)
+	if err != nil {
+		return nil, fmt.Errorf("refund: claim %s: %w", rf.ID, err)
+	}
+	if !claimed {
+		rf, err := s.refunds.GetByID(ctx, rf.ID)
+		if err != nil {
+			return nil, fmt.Errorf("refund: reload claimed refund %s: %w", rf.ID, err)
 		}
-		rf.Attempts++
-		return s.refunds.UpdateStatus(ctx, rf)
-	}); err != nil {
-		return nil, fmt.Errorf("refund: begin processing %s: %w", refundID, err)
+		return rf, nil
 	}
 
 	resp, gwErr := s.callGateway(ctx, adapter, rf, parent)
@@ -70,7 +93,7 @@ func (s *Service) ProcessRefund(ctx context.Context, refundID uuid.UUID) (*refun
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context) error {
 			return s.refunds.UpdateStatus(ctx, rf)
 		}); err != nil {
-			return nil, fmt.Errorf("refund: persist in-flight %s: %w", refundID, err)
+			return nil, fmt.Errorf("refund: persist in-flight %s: %w", rf.ID, err)
 		}
 		return rf, nil
 	}
@@ -117,7 +140,7 @@ func (s *Service) ProcessRefund(ctx context.Context, refundID uuid.UUID) (*refun
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("refund: finalize %s: %w", refundID, err)
+		return nil, fmt.Errorf("refund: finalize %s: %w", rf.ID, err)
 	}
 
 	if outcome.newStatus == refund.StatusRefunded {
@@ -153,6 +176,16 @@ func (s *Service) transitionParentOnRefundResult(ctx context.Context, parent *tr
 		return transaction.TransitionState(parent, transaction.StatusPartiallyRefunded, transaction.ActorSystem)
 	}
 
+	// Failure: only move the parent to REFUND_FAILED when no other refund
+	// activity is outstanding; otherwise it must stay in-flight so the other
+	// refunds can still resolve.
+	alreadyRefunded, err := s.refunds.SumActiveRefunds(ctx, parent.ID)
+	if err != nil {
+		return fmt.Errorf("refund: sum active refunds for parent %s: %w", parent.ID, err)
+	}
+	if alreadyRefunded > 0 {
+		return nil
+	}
 	return transaction.TransitionState(parent, transaction.StatusRefundFailed, transaction.ActorSystem)
 }
 
@@ -190,12 +223,25 @@ func (s *Service) ResolveCancelRefund(ctx context.Context, transactionID uuid.UU
 }
 
 func (s *Service) callGateway(ctx context.Context, adapter ports.GatewayAdapter, rf *refund.Refund, parent *transaction.Txn) (*ports.GatewayRefundResponse, *ports.GatewayError) {
+	// Refunds must be issued in the same currency/amount the gateway actually
+	// charged (fee-inclusive gateway_amount), not the nominal transaction
+	// amount, or gateways reject the refund for exceeding the capture.
+	// Partial refunds are prorated: the gateway charge includes fees on top of
+	// the nominal amount, so refunding rf.Amount of a captured gateway_amount
+	// requires the proportionate share of the fee-inclusive amount.
+	gwAmount := rf.Amount
+	gwCurrency := parent.Currency
+	if parent.GatewayAmount != nil {
+		gwAmount = (*parent.GatewayAmount * rf.Amount) / parent.Amount
+		gwCurrency = parent.GatewayCurrency
+	}
 	resp, err := adapter.Refund(ctx, ports.GatewayRefundRequest{
 		RefundID:           rf.ID,
 		TransactionID:      rf.TransactionID,
+		TenantID:           parent.TenantID,
 		GatewayReferenceID: parent.GatewayReferenceID,
-		Amount:             rf.Amount,
-		Currency:           parent.Currency,
+		Amount:             gwAmount,
+		Currency:           gwCurrency,
 		Reason:             rf.Reason,
 	})
 	if err != nil {

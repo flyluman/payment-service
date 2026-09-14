@@ -19,6 +19,7 @@ func TestTransitionState_ValidTransitions(t *testing.T) {
 		{StatusProcessing, StatusCaptured},
 		{StatusProcessing, StatusAuthorized},
 		{StatusProcessing, StatusFailed},
+		{StatusProcessing, StatusCancelled},
 		{StatusAuthorized, StatusCaptured},
 		{StatusAuthorized, StatusFailed},
 		{StatusAuthorized, StatusCancelled},
@@ -59,7 +60,6 @@ func TestTransitionState_InvalidTransitions(t *testing.T) {
 		to   Status
 	}{
 		{StatusPending, StatusRefunded},
-		{StatusProcessing, StatusCancelled},
 		{StatusProcessing, StatusPending},
 		{StatusCaptured, StatusProcessing},
 		{StatusCaptured, StatusPending},

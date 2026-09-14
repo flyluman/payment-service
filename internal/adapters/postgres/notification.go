@@ -3,12 +3,17 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/crownroutes/payment-service/internal/domain/notification"
 )
+
+// notificationClaimTTL is how long a claimed-but-unfinished notification stays
+// reserved before another worker may retry it (covers crashed workers).
+const notificationClaimTTL = 5 * time.Minute
 
 type NotificationStore struct {
 	db *DB
@@ -36,13 +41,24 @@ func (s *NotificationStore) Insert(ctx context.Context, n *notification.Notifica
 }
 
 func (s *NotificationStore) ListPendingNotifications(ctx context.Context, limit int) ([]*notification.Notification, error) {
+	claimTTLSec := int64(notificationClaimTTL.Seconds())
 	rows, err := s.db.Pool().Query(ctx, `
-		SELECT id, tenant_id, user_id, notification_type, channel, recipient, template_name, template_data, status, attempts, last_error, sent_at, created_at
-		FROM notifications
-		WHERE status = 'PENDING'
-		ORDER BY created_at ASC
-		LIMIT $1
-	`, limit)
+		UPDATE notifications n
+		SET locked_at = NOW()
+		FROM (
+			SELECT id
+			FROM notifications
+			WHERE status = 'PENDING'
+			  AND (locked_at IS NULL OR locked_at < NOW() - make_interval(secs => $2))
+			ORDER BY created_at ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		) AS claimed
+		WHERE n.id = claimed.id
+		RETURNING n.id, n.tenant_id, n.user_id, n.notification_type, n.channel,
+		          n.recipient, n.template_name, n.template_data, n.status,
+		          n.attempts, n.last_error, n.sent_at, n.created_at
+	`, limit, claimTTLSec)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +77,7 @@ func (s *NotificationStore) ListPendingNotifications(ctx context.Context, limit 
 
 func (s *NotificationStore) MarkNotificationSent(ctx context.Context, id uuid.UUID) error {
 	_, err := s.db.Pool().Exec(ctx, `
-		UPDATE notifications SET status = 'SENT', sent_at = NOW() WHERE id = $1
+		UPDATE notifications SET status = 'SENT', sent_at = NOW(), locked_at = NULL WHERE id = $1
 	`, id)
 	return err
 }
@@ -71,7 +87,8 @@ func (s *NotificationStore) MarkNotificationFailed(ctx context.Context, id uuid.
 		UPDATE notifications
 		SET status = CASE WHEN attempts >= 5 THEN 'FAILED' ELSE 'PENDING' END,
 		    attempts = attempts + 1,
-		    last_error = $2
+		    last_error = $2,
+		    locked_at = NULL
 		WHERE id = $1
 	`, id, lastError)
 	return err

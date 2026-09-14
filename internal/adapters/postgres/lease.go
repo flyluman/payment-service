@@ -66,3 +66,12 @@ ON CONFLICT (idempotency_key) DO NOTHING`, leaseKey, transactionID, ttlSec)
 	}
 	return tag.RowsAffected() == 1, nil
 }
+
+func (r *LeaseRepository) DeleteExpired(ctx context.Context) (int64, error) {
+	tag, err := r.db.pool.Exec(ctx, `DELETE FROM processing_lease
+WHERE lease_acquired_at < NOW() - (lease_ttl_sec * INTERVAL '1 second')`)
+	if err != nil {
+		return 0, fmt.Errorf("lease: delete expired: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

@@ -72,6 +72,7 @@ type RazorpayConfig struct {
 	KeySecret      string `json:"key_secret"`
 	BaseURL        string `json:"base_url,omitempty"`
 	PublishableKey string `json:"publishable_key,omitempty"`
+	WebhookSecret  string `json:"webhook_secret,omitempty"`
 }
 
 func (c RazorpayConfig) Provider() Provider { return ProviderRazorpay }
@@ -116,6 +117,12 @@ func ExtractWebhookSecret(provider Provider, raw json.RawMessage) (string, error
 	case StripeConfig:
 		return v.WebhookSecret, nil
 	case RazorpayConfig:
+		// Razorpay signs webhooks with the dedicated webhook secret, not the
+		// API key secret. Fall back to the key secret for tenants configured
+		// before webhook_secret existed.
+		if v.WebhookSecret != "" {
+			return v.WebhookSecret, nil
+		}
 		return v.KeySecret, nil
 	case FIBConfig:
 		return "", nil

@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,5 +134,30 @@ func TestResponseCache_MerchantScopedKeys(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("the same key under different merchants must not collide in the cache, ran %d", calls)
+	}
+}
+
+func TestResponseCache_DifferentBodiesDoNotCollide(t *testing.T) {
+	var calls int64
+	h := ResponseCache(newMemCache(), noopLog{})(countingHandler(&calls, http.StatusCreated, `{"ok":true}`))
+
+	doCached(h, "key-5", `{"a":1}`)
+	doCached(h, "key-5", `{"a":2}`)
+	if calls != 2 {
+		t.Errorf("same idempotency key with a different body must not reuse the cached response, ran %d", calls)
+	}
+}
+
+func TestResponseCache_BodyRestoredForHandler(t *testing.T) {
+	var gotBody string
+	h := ResponseCache(newMemCache(), noopLog{})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusCreated)
+	}))
+
+	doCached(h, "key-6", `{"a":42}`)
+	if gotBody != `{"a":42}` {
+		t.Errorf("handler should still see the request body after the middleware, got %q", gotBody)
 	}
 }

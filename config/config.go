@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,11 +92,11 @@ type OutboxConfig struct {
 }
 
 type RateLimitConfig struct {
-	FallbackMultiplier  float64       `mapstructure:"fallback_multiplier"`
-	LocalMaxBuckets     int           `mapstructure:"local_max_buckets"`
-	HealthCheckInterval time.Duration `mapstructure:"health_check_interval_ms"`
-	Capacity            int64         `mapstructure:"capacity"`
-	RefillPerSec        float64       `mapstructure:"refill_per_sec"`
+	FallbackMultiplier  float64 `mapstructure:"fallback_multiplier"`
+	LocalMaxBuckets     int     `mapstructure:"local_max_buckets"`
+	HealthCheckIntervalMS int   `mapstructure:"health_check_interval_ms"`
+	Capacity            int64   `mapstructure:"capacity"`
+	RefillPerSec        float64 `mapstructure:"refill_per_sec"`
 }
 
 type ObservabilityConfig struct {
@@ -174,6 +176,10 @@ func LoadConfig() (*Config, error) {
 
 	if configPath := os.Getenv("CONFIG_PATH"); configPath != "" {
 		v.SetConfigFile(configPath)
+		if filepath.Ext(configPath) == "" {
+			// viper cannot infer the config type from an extensionless path.
+			v.SetConfigType("yaml")
+		}
 	} else {
 		v.SetConfigName("config")
 		v.SetConfigType("yaml")
@@ -185,6 +191,18 @@ func LoadConfig() (*Config, error) {
 
 	v.SetDefault("outbox.shard_count", 64)
 	v.SetDefault("app.service_name", "payment-service")
+
+	// Defaults for fields validated by Validate(); these must be set before
+	// Unmarshal so a config that omits them still passes validation.
+	v.SetDefault("outbox.wal_lag_alert_threshold_mb", 100)
+	v.SetDefault("outbox.wal_lag_critical_threshold_mb", 200)
+	v.SetDefault("outbox.poll_interval_sec", 5)
+	v.SetDefault("outbox.claim_ttl_sec", 30)
+	v.SetDefault("outbox.max_attempts", 10)
+	v.SetDefault("outbox.batch_size", 100)
+	v.SetDefault("outbox.worker_count", 1)
+	v.SetDefault("outbox.worker_index", 0)
+	v.SetDefault("rate_limit.fallback_multiplier", 0.9)
 
 	envBindings := map[string]string{
 		"app.service_name":                 "SERVICE_NAME",
@@ -290,6 +308,12 @@ func intSecondsToDurationHook() mapstructure.DecodeHookFuncType {
 			return time.Duration(v) * time.Second, nil
 		case float64:
 			return time.Duration(v) * time.Second, nil
+		case string:
+			// Env var values arrive as strings. A bare number is interpreted as
+			// seconds; anything else falls through to StringToTimeDurationHookFunc.
+			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				return time.Duration(n) * time.Second, nil
+			}
 		}
 		return data, nil
 	}

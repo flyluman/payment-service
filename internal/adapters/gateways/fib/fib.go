@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -138,12 +139,12 @@ func (a *Adapter) InitiatePayment(ctx context.Context, req ports.GatewayPaymentR
 		Status:             ports.GatewayPaymentStatusPending,
 		Amount:             req.Amount,
 		Currency:           strings.ToUpper(req.Currency),
-		GatewayMetadata: rawMeta,
+		GatewayMetadata:    rawMeta,
 	}, nil
 }
 
 func (a *Adapter) CheckStatus(ctx context.Context, req ports.GatewayStatusRequest) (*ports.GatewayPaymentResponse, error) {
-	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	tc, err := a.resolveTenant(ctx, req.TenantID, req.TransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -164,16 +165,28 @@ func (a *Adapter) CheckStatus(ctx context.Context, req ports.GatewayStatusReques
 		currency = resp.Amount.Currency
 	}
 
+	// The status endpoint reports amounts as decimal strings; parse back into
+	// minor units so the response carries the actual charged amount.
+	var paidAmount int64
+	if resp.PaidAmount != nil {
+		paidAmount = *resp.PaidAmount
+	} else if resp.Amount != nil {
+		if parsed, err := parseAmount(resp.Amount.Amount); err == nil {
+			paidAmount = parsed
+		}
+	}
+
 	return &ports.GatewayPaymentResponse{
 		GatewayReferenceID: paymentID,
 		Status:             mapPaymentStatus(resp.Status),
+		Amount:             paidAmount,
 		Currency:           currency,
-		GatewayMetadata: map[string]any{},
+		GatewayMetadata:    map[string]any{},
 	}, nil
 }
 
 func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*ports.GatewayRefundResponse, error) {
-	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	tc, err := a.resolveTenant(ctx, req.TenantID, req.TransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +211,7 @@ func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*
 }
 
 func (a *Adapter) Cancel(ctx context.Context, req ports.GatewayCancelRequest) (*ports.GatewayCancelResponse, error) {
-	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	tc, err := a.resolveTenant(ctx, req.TenantID, req.TransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -224,15 +237,23 @@ func (a *Adapter) CapturePayment(ctx context.Context, req ports.GatewayCaptureRe
 	}
 }
 
-func (a *Adapter) resolveForTxn(ctx context.Context, txnID uuid.UUID) (*TenantConfig, error) {
-	v, ok := a.txnTenants.Load(txnID)
-	if !ok {
-		return nil, &ports.GatewayError{
-			Category: ports.ErrorCategoryGatewayError, Code: "tenant_not_cached",
-			GatewayMessage: fmt.Sprintf("tenant for transaction %s not found; InitiatePayment must be called first", txnID),
+// resolveTenant returns the tenant config for a transaction, preferring an explicit
+// tenantID supplied in the request (survives process restarts) and falling back to
+// the in-memory txn→tenant mapping populated during InitiatePayment.
+func (a *Adapter) resolveTenant(ctx context.Context, tenantID uuid.UUID, txnID uuid.UUID) (*TenantConfig, error) {
+	if tenantID == uuid.Nil {
+		v, ok := a.txnTenants.Load(txnID)
+		if !ok {
+			return nil, &ports.GatewayError{
+				Category: ports.ErrorCategoryGatewayError, Code: "tenant_not_cached",
+				GatewayMessage: fmt.Sprintf("tenant for transaction %s not found; InitiatePayment must be called first", txnID),
+			}
 		}
+		tenantID = v.(uuid.UUID)
+	} else {
+		a.txnTenants.Store(txnID, tenantID)
 	}
-	return a.resolve(ctx, v.(uuid.UUID))
+	return a.resolve(ctx, tenantID)
 }
 
 func (a *Adapter) authenticate(ctx context.Context, tc *TenantConfig) (string, error) {
@@ -428,7 +449,7 @@ func mapPaymentStatus(s string) ports.GatewayPaymentStatus {
 	case "CANCELLED":
 		return ports.GatewayPaymentStatusCancelled
 	case "REFUNDED":
-		return ports.GatewayPaymentStatusFailed
+		return ports.GatewayPaymentStatusRefunded
 	default:
 		return ports.GatewayPaymentStatusProcessing
 	}
@@ -466,4 +487,12 @@ func extractFibError(env fibErrorEnvelope) string {
 
 func formatAmount(amount int64) string {
 	return fmt.Sprintf("%d", amount)
+}
+
+func parseAmount(s string) (int64, error) {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return parsed, nil
 }

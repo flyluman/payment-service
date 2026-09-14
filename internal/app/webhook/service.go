@@ -50,6 +50,10 @@ type Transactor interface {
 	WithinTx(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
+type CancelResolver interface {
+	ResolveCancelRefund(ctx context.Context, transactionID uuid.UUID, amount int64) error
+}
+
 type Service struct {
 	txns         TransactionRepository
 	webhooks     WebhookRepo
@@ -58,6 +62,7 @@ type Service struct {
 	audit        ports.AuditLogStore
 	notif        ports.NotificationDispatcher
 	twDispatcher ports.TenantWebhookDispatcher
+	cancelRes    CancelResolver
 	log          ports.Logger
 	metrics      ports.MetricRecorder
 	bus          ports.EventBus
@@ -67,10 +72,11 @@ func NewService(txns TransactionRepository, webhooks WebhookRepo, outbox EventWr
 	return &Service{txns: txns, webhooks: webhooks, outbox: outbox, tx: tx, log: log, metrics: metrics}
 }
 
-func (s *Service) SetEventBus(bus ports.EventBus) { s.bus = bus }
-func (s *Service) SetAuditLogStore(a ports.AuditLogStore) { s.audit = a }
-func (s *Service) SetNotificationService(n ports.NotificationDispatcher) { s.notif = n }
+func (s *Service) SetEventBus(bus ports.EventBus)                             { s.bus = bus }
+func (s *Service) SetAuditLogStore(a ports.AuditLogStore)                     { s.audit = a }
+func (s *Service) SetNotificationService(n ports.NotificationDispatcher)      { s.notif = n }
 func (s *Service) SetTenantWebhookDispatcher(d ports.TenantWebhookDispatcher) { s.twDispatcher = d }
+func (s *Service) SetCancelResolver(r CancelResolver)                         { s.cancelRes = r }
 
 type webhookEventPayload struct {
 	TransactionID    string `json:"transaction_id"`
@@ -106,13 +112,24 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 		}
 
 		newStatus, terminal := mapWebhookStatus(ev.Status)
-		if !terminal || txn.Status != transaction.StatusProcessing {
+		if !terminal || newStatus == txn.Status {
 			outcome.Status = txn.Status
 			return nil
 		}
 
 		if err := transaction.TransitionState(txn, newStatus, transaction.ActorGateway); err != nil {
-			return err
+			// Out-of-order webhook (e.g. a refund/failure callback for a
+			// payment already advanced past PROCESSING). Commit the dedup
+			// record so we don't reprocess, but don't fail the gateway: a 500
+			// would just trigger endless retries of an event we can't apply.
+			s.log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{
+				ports.FieldGatewayID: gatewayID,
+				"reason":             "state_transition_rejected",
+				"status":             string(newStatus),
+				"current_state":      string(txn.Status),
+			})
+			outcome.Status = txn.Status
+			return nil
 		}
 		if newStatus == transaction.StatusFailed {
 			txn.FailureReason = &transaction.FailureReason{
@@ -139,8 +156,10 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 		if err != nil {
 			return err
 		}
-		if err := s.outbox.Write(ctx, event); err != nil {
-			return err
+		if event.EventType != "" {
+			if err := s.outbox.Write(ctx, event); err != nil {
+				return err
+			}
 		}
 
 		if txn.CallbackURL != "" {
@@ -166,6 +185,7 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 
 		s.dispatchTerminalNotification(ctx, txn, newStatus)
 		s.dispatchTenantWebhook(ctx, txn, newStatus)
+		s.resolveCancelIfRequested(ctx, txn, newStatus)
 
 		outcome.Resolved = true
 		outcome.Status = newStatus
@@ -194,13 +214,30 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 	return outcome, nil
 }
 
+func (s *Service) resolveCancelIfRequested(ctx context.Context, txn *transaction.Txn, status transaction.Status) {
+	if status != transaction.StatusCaptured || !txn.CancelIntent || s.cancelRes == nil {
+		return
+	}
+	if err := s.cancelRes.ResolveCancelRefund(ctx, txn.ID, txn.Amount); err != nil {
+		s.log.Error(ports.LogEventCancelResolution, map[string]any{
+			ports.FieldErrorCode:     "cancel_resolution_failed",
+			ports.FieldTransactionID: txn.ID.String(),
+			ports.FieldGatewayID:     txn.GatewayID,
+		}, err)
+		return
+	}
+	s.log.Info(ports.LogEventCancelResolution, map[string]any{ports.FieldTransactionID: txn.ID.String()})
+}
+
 func (s *Service) buildEvent(txn *transaction.Txn, status transaction.Status, gatewayID string) (ports.OutboxEvent, error) {
-	eventType := ports.EventTypeTransactionFailed
-	switch status {
-	case transaction.StatusCaptured:
-		eventType = ports.EventTypeTransactionCaptured
-	case transaction.StatusCancelled:
-		eventType = ports.EventTypeTransactionCancelled
+	eventType, ok := ports.EventTypeForTransactionStatus(status)
+	if !ok {
+		s.log.Warn(ports.LogEventWebhookInboundReceived, map[string]any{
+			ports.FieldTransactionID: txn.ID.String(),
+			"status":                 string(status),
+			"warning":                "no downstream event type for webhook status; skipping publish",
+		})
+		return ports.OutboxEvent{}, nil
 	}
 	payload, err := json.Marshal(webhookEventPayload{
 		TransactionID:    txn.ID.String(),
@@ -232,6 +269,8 @@ func mapWebhookStatus(s string) (transaction.Status, bool) {
 		return transaction.StatusFailed, true
 	case "cancelled", "canceled":
 		return transaction.StatusCancelled, true
+	case "refunded":
+		return transaction.StatusRefunded, true
 	default:
 		return "", false
 	}

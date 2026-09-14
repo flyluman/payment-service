@@ -16,6 +16,7 @@ type ReconciliationStore interface {
 	ListJobs(ctx context.Context, filter ReconciliationJobFilter) ([]*reconciliation.Job, error)
 	InsertEntries(ctx context.Context, entries []reconciliation.Entry) error
 	GetEntries(ctx context.Context, jobID uuid.UUID, filter ReconciliationEntryFilter) ([]*reconciliation.Entry, error)
+	GetEntry(ctx context.Context, entryID uuid.UUID) (*reconciliation.Entry, error)
 	UpdateEntry(ctx context.Context, entry *reconciliation.Entry) error
 	GetPendingJobs(ctx context.Context, limit int) ([]*reconciliation.Job, error)
 	GetAutoResolutionConfig(ctx context.Context, gatewayID, paymentMethod string) (*reconciliation.AutoResolutionConfig, error)
@@ -42,13 +43,15 @@ type SettlementEntry struct {
 }
 
 type ReconciliationJobFilter struct {
-	GatewayID   *string
-	Status      *string
+	Actor         *string
+	TenantID      *uuid.UUID
+	GatewayID     *string
+	Status        *string
 	TransactionID *uuid.UUID
-	DateFrom    *time.Time
-	DateTo      *time.Time
-	Limit       int
-	Offset      int
+	DateFrom      *time.Time
+	DateTo        *time.Time
+	Limit         int
+	Offset        int
 }
 
 type ReconciliationEntryFilter struct {

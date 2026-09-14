@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -56,6 +57,15 @@ func (f *fakeRefunds) UpdateStatus(_ context.Context, rf *domainrefund.Refund) e
 	f.updates++
 	rf.Version++
 	return nil
+}
+func (f *fakeRefunds) ClaimProcessing(_ context.Context, rf *domainrefund.Refund) (bool, error) {
+	rf.Status = domainrefund.StatusProcessing
+	rf.Attempts++
+	rf.Version++
+	return true, nil
+}
+func (f *fakeRefunds) ListStaleRefunds(context.Context, time.Duration, int, int) ([]uuid.UUID, error) {
+	return nil, nil
 }
 func (f *fakeRefunds) ExistsByReason(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
 	return f.exists, nil
@@ -199,6 +209,49 @@ func TestInitiateRefund_Success(t *testing.T) {
 	}
 	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeRefundInitiated {
 		t.Errorf("expected REFUND_INITIATED event, got %+v", outbox.events)
+	}
+}
+
+func TestProcessRefund_StuckProcessingRetriedByReaper(t *testing.T) {
+	parent := succeededTxn(100000)
+	parent.Status = transaction.StatusRefundPending
+	parent.GatewayReferenceID = "pi_1"
+	rf, _ := domainrefund.New(parent.ID, 40000, 100000, 0, "r", "by")
+	rf.AttemptedGateway = "stripe"
+	rf.Status = domainrefund.StatusProcessing
+	rf.Attempts = 1
+	refunds := &fakeRefunds{byID: map[uuid.UUID]*domainrefund.Refund{rf.ID: rf}}
+	outbox := &fakeOutbox{}
+	reg := &fakeRegistry{adapter: &fakeAdapter{resp: &ports.GatewayRefundResponse{GatewayRefundID: "re_2", Status: ports.GatewayRefundStatusCompleted}}}
+
+	s := NewService(&fakeTxns{txn: parent}, refunds, outbox, fakeTransactor{}, reg, noopLogger{}, noopMetrics{})
+	got, err := s.RetryStaleRefund(context.Background(), rf.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Status != domainrefund.StatusRefunded {
+		t.Errorf("expected REFUNDED after retry, got %s", got.Status)
+	}
+	if got.Attempts != 2 {
+		t.Errorf("expected attempts bumped to 2, got %d", got.Attempts)
+	}
+}
+
+func TestInitiateRefund_ReinitiationAfterFailure(t *testing.T) {
+	parent := succeededTxn(100000)
+	parent.Status = transaction.StatusRefundFailed
+	outbox := &fakeOutbox{}
+	refunds := &fakeRefunds{sum: 0}
+	s := svc(&fakeTxns{txn: parent}, refunds, outbox)
+
+	res, err := s.InitiateRefund(context.Background(), InitiateInput{
+		TransactionID: parent.ID, Amount: 40000, Reason: "retry", InitiatedBy: "ops:1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Refund.Status != domainrefund.StatusInitiated {
+		t.Errorf("expected REFUND_INITIATED on re-initiation, got %s", res.Refund.Status)
 	}
 }
 

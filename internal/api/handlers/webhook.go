@@ -9,9 +9,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/crownroutes/payment-service/internal/api/middleware"
+	appwebhook "github.com/crownroutes/payment-service/internal/app/webhook"
 	"github.com/crownroutes/payment-service/internal/domain/gateway"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
-	appwebhook "github.com/crownroutes/payment-service/internal/app/webhook"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
 
@@ -20,9 +20,12 @@ type WebhookProcessor interface {
 }
 type WebhookParserResolver interface {
 	WebhookParser(gatewayID string) (ports.GatewayWebhookParser, bool)
+	WebhookRequiresRefetch(gatewayID string) bool
+	CheckStatus(ctx context.Context, gatewayID string, req ports.GatewayStatusRequest) (*ports.GatewayPaymentResponse, error)
 }
 type WebhookTransactionGetter interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
+	GetByGatewayReference(ctx context.Context, gatewayID, reference string) (*transaction.Txn, error)
 }
 type WebhookTenantConfigGetter interface {
 	Get(ctx context.Context, tenantID uuid.UUID, gatewayID string) (*gateway.TenantGatewayConfig, error)
@@ -81,6 +84,14 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusUnauthorized, "unknown_tenant", "no tenant config for gateway")
 			return
 		}
+		if len(tcfg) > 1 {
+			h.log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{
+				ports.FieldGatewayID: gatewayID,
+				"reason":             "multiple_tenants_on_gateway_without_transaction_id",
+			})
+			writeError(w, r, http.StatusBadRequest, "ambiguous_tenant", "gateway is shared by multiple tenants; pass transaction_id")
+			return
+		}
 		tenantID = tcfg[0].TenantID
 	}
 
@@ -110,6 +121,14 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A transaction that was routed to a different gateway must not be advanced
+	// by this webhook. Checked only after confirming the gateway is registered
+	// so an unknown gateway yields 404 (above) rather than 400.
+	if txn != nil && txn.GatewayID != gatewayID && txn.ActualGateway != gatewayID {
+		writeError(w, r, http.StatusBadRequest, "gateway_mismatch", "transaction belongs to a different gateway")
+		return
+	}
+
 	ev, err := parser.ParseWebhook(rawBody, headerMap(r), secret)
 	if errors.Is(err, ports.ErrWebhookSignature) {
 		log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{ports.FieldGatewayID: gatewayID})
@@ -123,6 +142,39 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if ev.EventID == "" || ev.GatewayReferenceID == "" {
 		writeError(w, r, http.StatusBadRequest, "invalid_webhook", "event id and reference are required")
 		return
+	}
+
+	// Gateways with unsigned webhooks (e.g. FIB) must not have their status
+	// taken from the payload; re-fetch the authoritative status instead.
+	if h.parsers.WebhookRequiresRefetch(gatewayID) {
+		refTxn, err := h.txns.GetByGatewayReference(r.Context(), gatewayID, ev.GatewayReferenceID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "webhook_processing_failed", "could not resolve webhook transaction")
+			return
+		}
+		if refTxn == nil {
+			writeJSON(w, r, http.StatusOK, map[string]any{"unknown_txn": true})
+			return
+		}
+		if txnIDStr != "" && txn != nil && refTxn.ID != txn.ID {
+			writeError(w, r, http.StatusBadRequest, "transaction_mismatch", "webhook reference does not match transaction")
+			return
+		}
+		statusResp, err := h.parsers.CheckStatus(r.Context(), gatewayID, ports.GatewayStatusRequest{
+			TransactionID:      refTxn.ID,
+			TenantID:           refTxn.TenantID,
+			GatewayReferenceID: ev.GatewayReferenceID,
+			IdempotencyKey:     refTxn.GatewayIdempotencyKey,
+		})
+		if err != nil {
+			h.log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{
+				ports.FieldGatewayID: gatewayID,
+				"reason":             "status_refetch_failed",
+			})
+			writeError(w, r, http.StatusInternalServerError, "status_refetch_failed", "could not verify payment status")
+			return
+		}
+		ev.Status = statusResp.Status
 	}
 
 	if ev.Dispute != nil {
@@ -150,8 +202,8 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, r, http.StatusOK, map[string]any{
-		"duplicate":  outcome.Duplicate,
-		"resolved":  outcome.Resolved,
+		"duplicate":   outcome.Duplicate,
+		"resolved":    outcome.Resolved,
 		"unknown_txn": outcome.UnknownTxn,
 	})
 }
@@ -174,6 +226,8 @@ func normalizeStatus(s ports.GatewayPaymentStatus) string {
 		return "failed"
 	case ports.GatewayPaymentStatusCancelled:
 		return "cancelled"
+	case ports.GatewayPaymentStatusRefunded:
+		return "refunded"
 	default:
 		return "pending"
 	}

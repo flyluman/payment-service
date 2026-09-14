@@ -17,14 +17,14 @@ var (
 )
 
 type GatewayDisputeEvent struct {
-	GatewayDisputeID  string
+	GatewayDisputeID   string
 	GatewayReferenceID string // payment_intent ID (pi_xxx)
-	Status            string // maps to dispute domain status
-	Reason            string
-	Amount            int64
-	Currency          string
-	EvidenceDueBy     *time.Time
-	ResolvedAt        *time.Time
+	Status             string // maps to dispute domain status
+	Reason             string
+	Amount             int64
+	Currency           string
+	EvidenceDueBy      *time.Time
+	ResolvedAt         *time.Time
 }
 
 type GatewayWebhookEvent struct {
@@ -40,19 +40,27 @@ type GatewayWebhookParser interface {
 	ParseWebhook(body []byte, headers map[string]string, secret string) (*GatewayWebhookEvent, error)
 }
 
+// UnsignedWebhookGateway marks a gateway whose webhook payloads are not
+// cryptographically signed (e.g. FIB). Webhook statuses from such gateways
+// must not be trusted directly — callers must re-verify via CheckStatus.
+type UnsignedWebhookGateway interface {
+	UnsignedWebhooks() bool
+}
+
 type GatewayPaymentStatus string
 type GatewayRefundStatus string
 type GatewayCancelStatus string
 type ErrorCategory string
 
 const (
-	GatewayPaymentStatusPending     GatewayPaymentStatus = "PENDING"
-	GatewayPaymentStatusProcessing  GatewayPaymentStatus = "PROCESSING"
-	GatewayPaymentStatusAuthorized  GatewayPaymentStatus = "AUTHORIZED"
-	GatewayPaymentStatusSucceeded   GatewayPaymentStatus = "SUCCEEDED"
-	GatewayPaymentStatusFailed      GatewayPaymentStatus = "FAILED"
-	GatewayPaymentStatusCancelled   GatewayPaymentStatus = "CANCELLED"
-	GatewayPaymentStatusAmbiguous   GatewayPaymentStatus = "AMBIGUOUS"
+	GatewayPaymentStatusPending    GatewayPaymentStatus = "PENDING"
+	GatewayPaymentStatusProcessing GatewayPaymentStatus = "PROCESSING"
+	GatewayPaymentStatusAuthorized GatewayPaymentStatus = "AUTHORIZED"
+	GatewayPaymentStatusSucceeded  GatewayPaymentStatus = "SUCCEEDED"
+	GatewayPaymentStatusFailed     GatewayPaymentStatus = "FAILED"
+	GatewayPaymentStatusCancelled  GatewayPaymentStatus = "CANCELLED"
+	GatewayPaymentStatusRefunded   GatewayPaymentStatus = "REFUNDED"
+	GatewayPaymentStatusAmbiguous  GatewayPaymentStatus = "AMBIGUOUS"
 )
 const (
 	GatewayRefundStatusInitiated  GatewayRefundStatus = "INITIATED"
@@ -96,12 +104,14 @@ type GatewayPaymentRequest struct {
 }
 type GatewayStatusRequest struct {
 	TransactionID      uuid.UUID
+	TenantID           uuid.UUID
 	GatewayReferenceID string
 	IdempotencyKey     string
 }
 type GatewayRefundRequest struct {
 	RefundID           uuid.UUID
 	TransactionID      uuid.UUID
+	TenantID           uuid.UUID
 	GatewayReferenceID string
 	Amount             int64
 	Currency           string
@@ -110,6 +120,7 @@ type GatewayRefundRequest struct {
 }
 type GatewayCancelRequest struct {
 	TransactionID      uuid.UUID
+	TenantID           uuid.UUID
 	GatewayReferenceID string
 	IdempotencyKey     string
 }

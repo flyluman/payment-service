@@ -65,6 +65,7 @@ func TestLeaseReaper_RecoversStuckTransactionViaStatusCheck(t *testing.T) {
 		postgres.NewTransactionRepository(pg.DB),
 		svc,
 		postgres.NewIdempotencyRepository(pg.DB),
+		postgres.NewLeaseRepository(pg.DB),
 		discardLogger(),
 		leaseexpiry.Config{IdempotencyProcessingTimeout: time.Minute},
 	)
@@ -115,6 +116,7 @@ func TestLeaseReaper_SweepsStaleIdempotencyKeysOnly(t *testing.T) {
 		postgres.NewTransactionRepository(pg.DB),
 		buildService(pg, registry),
 		postgres.NewIdempotencyRepository(pg.DB),
+		postgres.NewLeaseRepository(pg.DB),
 		discardLogger(),
 		leaseexpiry.Config{IdempotencyProcessingTimeout: 5 * time.Minute},
 	)

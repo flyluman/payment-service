@@ -2,8 +2,8 @@ package reconciliation
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +15,7 @@ import (
 
 type TransactionReader interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
+	GetByIDs(ctx context.Context, ids []uuid.UUID) ([]*transaction.Txn, error)
 }
 
 type TransactionLister interface {
@@ -52,10 +53,11 @@ func NewService(
 	}
 }
 
-func (s *Service) CreateJob(ctx context.Context, gatewayID string, periodStart, periodEnd *time.Time, transactionID *uuid.UUID, triggeredBy string) (*reconciliation.Job, error) {
+func (s *Service) CreateJob(ctx context.Context, gatewayID string, tenantID *uuid.UUID, periodStart, periodEnd *time.Time, transactionID *uuid.UUID, triggeredBy string) (*reconciliation.Job, error) {
 	job := &reconciliation.Job{
 		ID:            uuid.Must(uuid.NewV7()),
 		GatewayID:     gatewayID,
+		TenantID:      tenantID,
 		TransactionID: transactionID,
 		PeriodStart:   periodStart,
 		PeriodEnd:     periodEnd,
@@ -70,15 +72,7 @@ func (s *Service) CreateJob(ctx context.Context, gatewayID string, periodStart, 
 	return job, nil
 }
 
-func (s *Service) RunJob(ctx context.Context, jobID uuid.UUID) error {
-	job, err := s.store.GetJob(ctx, jobID)
-	if err != nil {
-		return fmt.Errorf("reconciliation: load job: %w", err)
-	}
-	if job.Status != reconciliation.JobStatusPending {
-		return nil
-	}
-
+func (s *Service) run(ctx context.Context, job *reconciliation.Job) error {
 	now := time.Now().UTC()
 	job.Status = reconciliation.JobStatusRunning
 	job.StartedAt = &now
@@ -92,6 +86,7 @@ func (s *Service) RunJob(ctx context.Context, jobID uuid.UUID) error {
 	})
 
 	var entries []reconciliation.Entry
+	var err error
 
 	if job.TransactionID != nil {
 		entries, err = s.reconcileSingle(ctx, job)
@@ -174,7 +169,7 @@ func (s *Service) reconcileSingle(ctx context.Context, job *reconciliation.Job) 
 			TransactionID:    txn.ID,
 			InternalStatus:   string(txn.Status),
 			GatewayStatus:    "NOT_FOUND_IN_REPORT",
-			InternalAmount:   txn.Amount,
+			InternalAmount:   settledAmountFor(txn),
 			GatewayAmount:    0,
 			MismatchType:     reconciliation.MismatchMissingGateway,
 			ResolutionStatus: reconciliation.ResolutionUnresolved,
@@ -190,96 +185,91 @@ func (s *Service) reconcileBatch(ctx context.Context, job *reconciliation.Job) (
 	if !ok {
 		return nil, fmt.Errorf("no settlement fetcher for gateway %s", job.GatewayID)
 	}
+	if job.TenantID == nil {
+		return nil, fmt.Errorf("batch job %s has no tenant_id; tenant-scoped settlement is required", job.ID)
+	}
 
-	report, err := fetcher.FetchSettlementReport(ctx, uuid.Nil, job.GatewayID, *job.PeriodStart, *job.PeriodEnd)
+	report, err := fetcher.FetchSettlementReport(ctx, *job.TenantID, job.GatewayID, *job.PeriodStart, *job.PeriodEnd)
 	if err != nil {
 		return nil, fmt.Errorf("fetch settlement: %w", err)
 	}
 
-	// Fetch all internal transactions for this gateway in the period.
-	gw := job.GatewayID
+	// Load all internal transactions for this tenant+gateway in the period,
+	// paging through the cursor until the store's page cap is exhausted.
 	filter := ports.TransactionFilter{
-		GatewayID: []string{gw},
+		TenantID:  job.TenantID,
+		GatewayID: []string{job.GatewayID},
 		DateFrom:  job.PeriodStart,
 		DateTo:    job.PeriodEnd,
-		Limit:     10000,
+		Limit:     100,
 	}
-	result, err := s.txnLister.List(ctx, filter)
+
+	var summaries []ports.TransactionSummary
+	for {
+		result, err := s.txnLister.List(ctx, filter)
+		if err != nil {
+			return nil, fmt.Errorf("list internal transactions: %w", err)
+		}
+		summaries = append(summaries, result.Transactions...)
+		if !result.HasMore || result.NextCursor == nil {
+			break
+		}
+		filter.Cursor = result.NextCursor
+	}
+
+	fullTxns, err := s.txnRepo.GetByIDs(ctx, idsFromSummary(summaries))
 	if err != nil {
-		return nil, fmt.Errorf("list internal transactions: %w", err)
+		return nil, fmt.Errorf("load full transactions: %w", err)
 	}
 
-	// Index internal transactions by gateway_reference_id for fast lookup.
-	type txnRef struct {
-		txn          *ports.TransactionSummary
-		reconciled   bool
-	}
-	internalByRef := make(map[string]*txnRef, len(result.Transactions))
-	for i := range result.Transactions {
-		// We need the full txn to get GatewayReferenceID; Summary doesn't have it.
-		// Fall back to fetching each individually if needed.
-		t := &result.Transactions[i]
-		internalByRef[t.ID.String()] = &txnRef{txn: t}
+	internalByRef := make(map[string]*transaction.Txn, len(fullTxns))
+	for _, t := range fullTxns {
+		if t.GatewayReferenceID != "" {
+			internalByRef[t.GatewayReferenceID] = t
+		}
 	}
 
-	// Fetch full transactions to get GatewayReferenceID.
 	var entries []reconciliation.Entry
 	matchedInternal := make(map[uuid.UUID]bool)
 
 	for _, se := range report.Entries {
-		// Try to find matching internal transaction by ref.
-		found := false
-		for id, ref := range internalByRef {
-			uid, _ := uuid.Parse(id)
-			fullTxn, err := s.txnRepo.GetByID(ctx, uid)
-			if err != nil {
-				continue
+		fullTxn, found := internalByRef[se.TransactionRef]
+		if found {
+			entry := s.compareTransaction(fullTxn, &se, job.ID)
+			if entry != nil {
+				entries = append(entries, *entry)
 			}
-			if fullTxn.GatewayReferenceID == se.TransactionRef {
-				entry := s.compareTransactionFull(fullTxn, &se, job.ID)
-				if entry != nil {
-					entries = append(entries, *entry)
-				}
-				matchedInternal[uid] = true
-				ref.reconciled = true
-				found = true
-				break
-			}
+			matchedInternal[fullTxn.ID] = true
+			continue
 		}
-		if !found {
-			// Gateway entry with no matching internal transaction.
-			entries = append(entries, reconciliation.Entry{
-				ID:                 uuid.Must(uuid.NewV7()),
-				JobID:              job.ID,
-				TransactionID:      uuid.Nil,
-				InternalStatus:     "",
-				GatewayStatus:      se.GatewayStatus,
-				InternalAmount:     0,
-				GatewayAmount:      se.GatewayAmount,
-				GatewayFees:        se.GatewayFees,
-				FXRateAtSettlement: se.FXRate,
-				MismatchType:       reconciliation.MismatchMissingInternal,
-				ResolutionStatus:   reconciliation.ResolutionUnresolved,
-			})
-		}
+		// Gateway entry with no matching internal transaction.
+		entries = append(entries, reconciliation.Entry{
+			ID:                 uuid.Must(uuid.NewV7()),
+			JobID:              job.ID,
+			TransactionID:      uuid.Nil,
+			InternalStatus:     "",
+			GatewayStatus:      se.GatewayStatus,
+			InternalAmount:     0,
+			GatewayAmount:      se.GatewayAmount,
+			GatewayFees:        se.GatewayFees,
+			FXRateAtSettlement: se.FXRate,
+			MismatchType:       reconciliation.MismatchMissingInternal,
+			ResolutionStatus:   reconciliation.ResolutionUnresolved,
+		})
 	}
 
 	// Check for internal transactions not found in gateway report.
-	for id, ref := range internalByRef {
-		if ref.reconciled {
-			continue
-		}
-		uid, _ := uuid.Parse(id)
-		if matchedInternal[uid] {
+	for _, t := range fullTxns {
+		if matchedInternal[t.ID] {
 			continue
 		}
 		entries = append(entries, reconciliation.Entry{
 			ID:               uuid.Must(uuid.NewV7()),
 			JobID:            job.ID,
-			TransactionID:    uid,
-			InternalStatus:   ref.txn.Status,
+			TransactionID:    t.ID,
+			InternalStatus:   string(t.Status),
 			GatewayStatus:    "NOT_FOUND_IN_REPORT",
-			InternalAmount:   ref.txn.Amount,
+			InternalAmount:   settledAmountFor(t),
 			GatewayAmount:    0,
 			MismatchType:     reconciliation.MismatchMissingGateway,
 			ResolutionStatus: reconciliation.ResolutionUnresolved,
@@ -289,14 +279,28 @@ func (s *Service) reconcileBatch(ctx context.Context, job *reconciliation.Job) (
 	return entries, nil
 }
 
+// idsFromSummary extracts the transaction ids from a list result.
+func idsFromSummary(txns []ports.TransactionSummary) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(txns))
+	for _, t := range txns {
+		ids = append(ids, t.ID)
+	}
+	return ids
+}
+
 func (s *Service) compareTransaction(txn *transaction.Txn, se *ports.SettlementEntry, jobID uuid.UUID) *reconciliation.Entry {
+	// The gateway settles the fee-inclusive gross amount it was charged, so
+	// compare against gateway_amount when present rather than the nominal
+	// amount, or every fee-bearing payment shows up as an amount mismatch.
+	internalAmount := settledAmountFor(txn)
+
 	entry := &reconciliation.Entry{
 		ID:                 uuid.Must(uuid.NewV7()),
 		JobID:              jobID,
 		TransactionID:      txn.ID,
 		InternalStatus:     string(txn.Status),
 		GatewayStatus:      se.GatewayStatus,
-		InternalAmount:     txn.Amount,
+		InternalAmount:     internalAmount,
 		GatewayAmount:      se.GatewayAmount,
 		InternalFees:       nil,
 		GatewayFees:        se.GatewayFees,
@@ -314,7 +318,7 @@ func (s *Service) compareTransaction(txn *transaction.Txn, se *ports.SettlementE
 		entry.MismatchType = reconciliation.MismatchStatus
 	} else if !isInternalSuccess(txn.Status) && se.GatewayStatus == "succeeded" {
 		entry.MismatchType = reconciliation.MismatchStatus
-	} else if txn.Amount != se.GatewayAmount {
+	} else if internalAmount != se.GatewayAmount {
 		entry.MismatchType = reconciliation.MismatchAmount
 	} else if entry.InternalFees != nil && se.GatewayFees != nil && *entry.InternalFees != *se.GatewayFees {
 		entry.MismatchType = reconciliation.MismatchFee
@@ -325,50 +329,84 @@ func (s *Service) compareTransaction(txn *transaction.Txn, se *ports.SettlementE
 	return entry
 }
 
-// compareTransactionFull is like compareTransaction but works with TransactionSummary.
-func (s *Service) compareTransactionFull(txn *transaction.Txn, se *ports.SettlementEntry, jobID uuid.UUID) *reconciliation.Entry {
-	return s.compareTransaction(txn, se, jobID)
-}
-
-func (s *Service) GetJob(ctx context.Context, id uuid.UUID) (*reconciliation.Job, error) {
-	return s.store.GetJob(ctx, id)
+func (s *Service) GetJob(ctx context.Context, actor string, id uuid.UUID) (*reconciliation.Job, error) {
+	job, err := s.store.GetJob(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !s.canAccessJob(actor, job) {
+		return nil, ErrNotFound
+	}
+	return job, nil
 }
 
 func (s *Service) ListJobs(ctx context.Context, filter ports.ReconciliationJobFilter) ([]*reconciliation.Job, error) {
 	return s.store.ListJobs(ctx, filter)
 }
 
-func (s *Service) GetEntries(ctx context.Context, jobID uuid.UUID, filter ports.ReconciliationEntryFilter) ([]*reconciliation.Entry, error) {
+func (s *Service) RunJob(ctx context.Context, actor string, id uuid.UUID) error {
+	job, err := s.store.GetJob(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !s.canAccessJob(actor, job) {
+		return ErrNotFound
+	}
+	if job.Status != reconciliation.JobStatusPending {
+		return nil
+	}
+	return s.run(ctx, job)
+}
+
+func (s *Service) GetEntries(ctx context.Context, actor string, jobID uuid.UUID, filter ports.ReconciliationEntryFilter) ([]*reconciliation.Entry, error) {
+	job, err := s.store.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if !s.canAccessJob(actor, job) {
+		return nil, ErrNotFound
+	}
 	return s.store.GetEntries(ctx, jobID, filter)
 }
 
-func (s *Service) ResolveEntry(ctx context.Context, entryID uuid.UUID, resolvedBy, notes string) error {
-	now := time.Now().UTC()
-	entry := &reconciliation.Entry{
-		ID:               entryID,
-		ResolutionStatus: reconciliation.ResolutionResolved,
-		ResolvedBy:       resolvedBy,
-		ResolvedAt:       &now,
-		Notes:            notes,
+func (s *Service) ResolveEntry(ctx context.Context, actor string, entryID uuid.UUID, resolvedBy, notes string) error {
+	entry, err := s.store.GetEntry(ctx, entryID)
+	if err != nil {
+		return err
 	}
+	job, err := s.store.GetJob(ctx, entry.JobID)
+	if err != nil {
+		return err
+	}
+	if !s.canAccessJob(actor, job) {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	entry.ResolutionStatus = reconciliation.ResolutionResolved
+	entry.ResolvedBy = resolvedBy
+	entry.ResolvedAt = &now
+	entry.Notes = notes
 	return s.store.UpdateEntry(ctx, entry)
 }
 
-// feeDiscrepancy returns the absolute difference between internal and gateway fees, or 0 if either is nil.
-func feeDiscrepancy(internal, gateway *int64) int64 {
-	if internal == nil || gateway == nil {
-		return 0
+// canAccessJob returns true if actor may view/manage the job. Ops ("ops") may
+// access any job; service actors may only access jobs they created.
+func (s *Service) canAccessJob(actor string, job *reconciliation.Job) bool {
+	if actor == "ops" {
+		return true
 	}
-	d := *internal - *gateway
-	if d < 0 {
-		d = -d
-	}
-	return d
+	return job.Actor == actor
 }
 
-// roundUp rounds a float64 up to the nearest integer.
-func roundUp(f float64) int64 {
-	return int64(math.Ceil(f))
+var ErrNotFound = errors.New("not found")
+
+// settledAmountFor returns the fee-inclusive amount expected in a gateway
+// settlement report (gateway_amount when set, else the nominal amount).
+func settledAmountFor(txn *transaction.Txn) int64 {
+	if txn.GatewayAmount != nil {
+		return *txn.GatewayAmount
+	}
+	return txn.Amount
 }
 
 func isInternalSuccess(s transaction.Status) bool {

@@ -23,6 +23,10 @@ type IdempotencySweeper interface {
 	DeleteExpired(ctx context.Context) (int64, error)
 }
 
+type LeaseSweeper interface {
+	DeleteExpired(ctx context.Context) (int64, error)
+}
+
 type Config struct {
 	IdempotencyProcessingTimeout time.Duration
 }
@@ -31,21 +35,39 @@ type Reaper struct {
 	txns    ExpiredLeaseLister
 	recover LeaseRecoverer
 	idem    IdempotencySweeper
+	leases  LeaseSweeper
 	log     ports.Logger
 	cfg     Config
 }
 
-func New(txns ExpiredLeaseLister, recover LeaseRecoverer, idem IdempotencySweeper, log ports.Logger, cfg Config) *Reaper {
+func New(txns ExpiredLeaseLister, recover LeaseRecoverer, idem IdempotencySweeper, leases LeaseSweeper, log ports.Logger, cfg Config) *Reaper {
 	if cfg.IdempotencyProcessingTimeout <= 0 {
 		cfg.IdempotencyProcessingTimeout = 5 * time.Minute
 	}
-	return &Reaper{txns: txns, recover: recover, idem: idem, log: log, cfg: cfg}
+	return &Reaper{txns: txns, recover: recover, idem: idem, leases: leases, log: log, cfg: cfg}
 }
 
 func (r *Reaper) RunOnce(ctx context.Context) error {
 	r.reapLeases(ctx)
 	r.sweepIdempotency(ctx)
+	r.sweepLeases(ctx)
 	return nil
+}
+
+func (r *Reaper) sweepLeases(ctx context.Context) {
+	if r.leases == nil {
+		return
+	}
+	expired, err := r.leases.DeleteExpired(ctx)
+	if err != nil {
+		r.log.Error(ports.LogEventTransactionLeaseExpired, map[string]any{
+			ports.FieldErrorCode:     "lease_expiry_failed",
+			ports.FieldTraceID:       "",
+			ports.FieldTransactionID: "",
+		}, err)
+	} else if expired > 0 {
+		r.log.Info(ports.LogEventTransactionLeaseExpired, map[string]any{"purged": expired})
+	}
 }
 
 func (r *Reaper) reapLeases(ctx context.Context) {

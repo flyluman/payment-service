@@ -3,7 +3,9 @@ package cancel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -18,6 +20,8 @@ const (
 	OutcomeRequested       Outcome = "CANCEL_REQUESTED"
 	OutcomeAlreadyTerminal Outcome = "ALREADY_TERMINAL"
 )
+
+var ErrNotFound = errors.New("cancel: transaction not found")
 
 type Result struct {
 	Verdict idempotency.Verdict
@@ -42,7 +46,7 @@ func NewService(txns TransactionStore, log ports.Logger, metrics ports.MetricRec
 	return &Service{txns: txns, log: log, metrics: metrics}
 }
 
-func (s *Service) SetIdempotency(g *idempotency.Guard) { s.idem = g }
+func (s *Service) SetIdempotency(g *idempotency.Guard)    { s.idem = g }
 func (s *Service) SetAuditLogStore(a ports.AuditLogStore) { s.audit = a }
 
 type CancelInput struct {
@@ -104,11 +108,14 @@ func (s *Service) Cancel(ctx context.Context, in CancelInput) (Result, error) {
 func (s *Service) cancel(ctx context.Context, in CancelInput) (Outcome, transaction.Status, error) {
 	txn, err := s.txns.GetByID(ctx, in.TransactionID)
 	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return "", "", ErrNotFound
+		}
 		return "", "", fmt.Errorf("cancel: load transaction %s: %w", in.TransactionID, err)
 	}
 
 	if in.TenantID != uuid.Nil && txn.TenantID != in.TenantID {
-		return "", "", fmt.Errorf("cancel: tenant mismatch for %s", in.TransactionID)
+		return "", "", ErrNotFound
 	}
 
 	if txn.Status.IsTerminal() {

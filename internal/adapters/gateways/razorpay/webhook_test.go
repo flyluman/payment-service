@@ -45,7 +45,7 @@ func TestParseWebhook_BadSignature(t *testing.T) {
 func TestParseWebhook_FailedStatus(t *testing.T) {
 	a := New(Config{})
 	secret := "whsec"
-	body := []byte(`{"payload":{"payment":{"entity":{"id":"pay_2","order_id":"order_2","status":"failed"}}}}`)
+	body := []byte(`{"event":"payment.failed","payload":{"payment":{"entity":{"id":"pay_2","order_id":"order_2","status":"failed"}}}}`)
 	headers := map[string]string{"X-Razorpay-Signature": rzpSig(secret, body)}
 
 	ev, err := a.ParseWebhook(body, headers, secret)
@@ -55,7 +55,33 @@ func TestParseWebhook_FailedStatus(t *testing.T) {
 	if ev.Status != ports.GatewayPaymentStatusFailed {
 		t.Errorf("expected FAILED, got %s", ev.Status)
 	}
-	if ev.EventID != "pay_2" {
-		t.Errorf("expected fallback event id from payment id, got %q", ev.EventID)
+	if ev.EventID != "pay_2:payment.failed" {
+		t.Errorf("expected composite fallback event id, got %q", ev.EventID)
+	}
+}
+
+func TestParseWebhook_EventIDVariesWithEvent(t *testing.T) {
+	a := New(Config{})
+	secret := "whsec"
+	body := func(event string) []byte {
+		return []byte(`{"event":"` + event + `","payload":{"payment":{"entity":{"id":"pay_3","order_id":"order_3","status":"authorized"}}}}`)
+	}
+	sigHeaders := func(b []byte) map[string]string {
+		return map[string]string{"X-Razorpay-Signature": rzpSig(secret, b)}
+	}
+
+	authEv, err := a.ParseWebhook(body("payment.authorized"), sigHeaders(body("payment.authorized")), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capEv, err := a.ParseWebhook(body("payment.captured"), sigHeaders(body("payment.captured")), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authEv.EventID == capEv.EventID {
+		t.Errorf("expected distinct event ids across event types, got %s", authEv.EventID)
+	}
+	if authEv.Status != ports.GatewayPaymentStatusAuthorized {
+		t.Errorf("expected AUTHORIZED, got %s", authEv.Status)
 	}
 }

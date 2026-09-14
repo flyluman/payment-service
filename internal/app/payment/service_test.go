@@ -84,8 +84,10 @@ func (l *fakeLease) TryAcquireDirect(ctx context.Context, leaseKey, transactionI
 }
 
 type fakeAdapter struct {
-	resp *ports.GatewayPaymentResponse
-	err  error
+	resp       *ports.GatewayPaymentResponse
+	capture    *ports.GatewayCaptureResponse
+	captureErr error
+	err        error
 }
 
 func (a *fakeAdapter) InitiatePayment(ctx context.Context, req ports.GatewayPaymentRequest) (*ports.GatewayPaymentResponse, error) {
@@ -101,7 +103,7 @@ func (a *fakeAdapter) Cancel(ctx context.Context, req ports.GatewayCancelRequest
 	return nil, nil
 }
 func (a *fakeAdapter) CapturePayment(ctx context.Context, req ports.GatewayCaptureRequest) (*ports.GatewayCaptureResponse, error) {
-	return nil, nil
+	return a.capture, a.captureErr
 }
 func (a *fakeAdapter) Capabilities() ports.GatewayCapabilities { return ports.GatewayCapabilities{} }
 

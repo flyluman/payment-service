@@ -23,6 +23,7 @@ type TenantWebhookConfigStore interface {
 type TenantWebhookConfigWriter interface {
 	Upsert(ctx context.Context, cfg *TenantWebhookConfig) error
 	List(ctx context.Context) ([]*TenantWebhookConfig, error)
+	ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]*TenantWebhookConfig, error)
 }
 
 type TenantWebhookConfig struct {

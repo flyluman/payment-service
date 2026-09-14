@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -15,10 +16,10 @@ import (
 
 type DisputeService interface {
 	CreateDispute(ctx context.Context, d *dispute.Dispute) error
-	GetDispute(ctx context.Context, id uuid.UUID) (*dispute.Dispute, error)
+	GetDispute(ctx context.Context, tenantID, id uuid.UUID) (*dispute.Dispute, error)
 	ListDisputes(ctx context.Context, filters ports.DisputeFilters) ([]*dispute.Dispute, error)
-	SubmitEvidence(ctx context.Context, disputeID uuid.UUID, ev *dispute.Evidence) error
-	ListEvidence(ctx context.Context, disputeID uuid.UUID) ([]*dispute.Evidence, error)
+	SubmitEvidence(ctx context.Context, tenantID, disputeID uuid.UUID, ev *dispute.Evidence) error
+	ListEvidence(ctx context.Context, tenantID, disputeID uuid.UUID) ([]*dispute.Evidence, error)
 }
 
 type DisputeHandler struct {
@@ -93,6 +94,18 @@ func toEvidenceResponse(e *dispute.Evidence) evidenceResponse {
 	}
 }
 
+func tenantIDFromCtx(r *http.Request) uuid.UUID {
+	t := middleware.TenantIDFromContext(r.Context())
+	if t == "" {
+		return uuid.Nil
+	}
+	id, err := uuid.Parse(t)
+	if err != nil {
+		return uuid.Nil
+	}
+	return id
+}
+
 func (h *DisputeHandler) List(w http.ResponseWriter, r *http.Request) {
 	if _, ok := middleware.PrincipalFromContext(r.Context()); !ok {
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "missing authentication")
@@ -101,6 +114,11 @@ func (h *DisputeHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	filters := ports.DisputeFilters{
 		Limit: 50,
+	}
+	if t := middleware.TenantIDFromContext(r.Context()); t != "" {
+		if id, err := uuid.Parse(t); err == nil {
+			filters.TenantID = id
+		}
 	}
 	if s := r.URL.Query().Get("status"); s != "" {
 		st := dispute.Status(s)
@@ -150,7 +168,7 @@ func (h *DisputeHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d, err := h.svc.GetDispute(r.Context(), id)
+	d, err := h.svc.GetDispute(r.Context(), tenantIDFromCtx(r), id)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "not_found", "dispute not found")
 		return
@@ -191,7 +209,11 @@ func (h *DisputeHandler) SubmitEvidence(w http.ResponseWriter, r *http.Request) 
 		SubmittedAt: time.Now().UTC(),
 	}
 
-	if err := h.svc.SubmitEvidence(r.Context(), id, ev); err != nil {
+	if err := h.svc.SubmitEvidence(r.Context(), tenantIDFromCtx(r), id, ev); err != nil {
+		if errors.Is(err, dispute.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "dispute not found")
+			return
+		}
 		writeError(w, r, http.StatusConflict, "submit_failed", err.Error())
 		return
 	}
@@ -209,8 +231,12 @@ func (h *DisputeHandler) ListEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	evidence, err := h.svc.ListEvidence(r.Context(), id)
+	evidence, err := h.svc.ListEvidence(r.Context(), tenantIDFromCtx(r), id)
 	if err != nil {
+		if errors.Is(err, dispute.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "dispute not found")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "list_failed", "could not list evidence")
 		return
 	}

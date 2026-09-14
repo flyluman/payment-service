@@ -49,7 +49,6 @@ func ContextWithPrincipal(ctx context.Context, p Principal) context.Context {
 	return ctx
 }
 
-
 func TenantIDFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(tenantIDKey).(string); ok {
 		return v
@@ -70,7 +69,7 @@ func Authenticate(provider TokenProvider, log ports.Logger) func(http.Handler) h
 			path := r.URL.Path
 
 			// Hard-exempt: no service token possible
-			if path == "/health" || path == "/favicon.ico" || strings.HasPrefix(path, "/webhooks/") || strings.HasPrefix(path, "/pay/") {
+			if path == "/" || path == "/health" || path == "/favicon.ico" || strings.HasPrefix(path, "/webhooks/") || strings.HasPrefix(path, "/pay/") {
 				next.ServeHTTP(w, r)
 				return
 			}

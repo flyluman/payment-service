@@ -102,7 +102,7 @@ func (a *Adapter) InitiatePayment(ctx context.Context, req ports.GatewayPaymentR
 }
 
 func (a *Adapter) CheckStatus(ctx context.Context, req ports.GatewayStatusRequest) (*ports.GatewayPaymentResponse, error) {
-	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	tc, err := a.resolveTenant(ctx, req.TenantID, req.TransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -115,9 +115,28 @@ func (a *Adapter) CheckStatus(ctx context.Context, req ports.GatewayStatusReques
 }
 
 func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*ports.GatewayRefundResponse, error) {
-	tc, err := a.resolveForTxn(ctx, req.TransactionID)
+	tc, err := a.resolveTenant(ctx, req.TenantID, req.TransactionID)
 	if err != nil {
 		return nil, err
+	}
+
+	// Razorpay refunds are keyed by payment ID (pay_...), but the stored
+	// gateway reference is the order ID (order_...) created at initiate time.
+	// Resolve the payment ID via the order's payments list when necessary.
+	paymentID := req.GatewayReferenceID
+	if strings.HasPrefix(paymentID, "order_") {
+		var list rzpPaymentListResponse
+		path := "/v1/payments?" + url.Values{"order_id": {paymentID}}.Encode()
+		if err := a.do(ctx, tc, http.MethodGet, path, nil, &list); err != nil {
+			return nil, err
+		}
+		if len(list.Items) == 0 {
+			return nil, &ports.GatewayError{
+				Category: ports.ErrorCategoryGatewayError, Code: "no_payment_found",
+				GatewayMessage: "no payment found for order " + paymentID,
+			}
+		}
+		paymentID = list.Items[0].ID
 	}
 
 	body := map[string]any{}
@@ -129,7 +148,7 @@ func (a *Adapter) Refund(ctx context.Context, req ports.GatewayRefundRequest) (*
 	}
 
 	var refund rzpRefund
-	if err := a.do(ctx, tc, http.MethodPost, "/v1/payments/"+url.PathEscape(req.GatewayReferenceID)+"/refund", body, &refund); err != nil {
+	if err := a.do(ctx, tc, http.MethodPost, "/v1/payments/"+url.PathEscape(paymentID)+"/refund", body, &refund); err != nil {
 		return nil, err
 	}
 	return &ports.GatewayRefundResponse{
@@ -151,15 +170,23 @@ func (a *Adapter) CapturePayment(ctx context.Context, req ports.GatewayCaptureRe
 	}
 }
 
-func (a *Adapter) resolveForTxn(ctx context.Context, txnID uuid.UUID) (*TenantConfig, error) {
-	v, ok := a.txnTenants.Load(txnID)
-	if !ok {
-		return nil, &ports.GatewayError{
-			Category: ports.ErrorCategoryGatewayError, Code: "tenant_not_cached",
-			GatewayMessage: fmt.Sprintf("tenant for transaction %s not found", txnID),
+// resolveTenant returns the tenant config for a transaction, preferring an explicit
+// tenantID supplied in the request (survives process restarts) and falling back to
+// the in-memory txn→tenant mapping populated during InitiatePayment.
+func (a *Adapter) resolveTenant(ctx context.Context, tenantID uuid.UUID, txnID uuid.UUID) (*TenantConfig, error) {
+	if tenantID == uuid.Nil {
+		v, ok := a.txnTenants.Load(txnID)
+		if !ok {
+			return nil, &ports.GatewayError{
+				Category: ports.ErrorCategoryGatewayError, Code: "tenant_not_cached",
+				GatewayMessage: fmt.Sprintf("tenant for transaction %s not found", txnID),
+			}
 		}
+		tenantID = v.(uuid.UUID)
+	} else {
+		a.txnTenants.Store(txnID, tenantID)
 	}
-	return a.resolve(ctx, v.(uuid.UUID))
+	return a.resolve(ctx, tenantID)
 }
 
 func (a *Adapter) do(ctx context.Context, tc *TenantConfig, method, path string, body any, out any) error {

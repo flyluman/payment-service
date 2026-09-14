@@ -3,11 +3,14 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/crownroutes/payment-service/internal/api/middleware"
 	"github.com/crownroutes/payment-service/internal/ports"
@@ -15,7 +18,7 @@ import (
 
 type DeadLetterService interface {
 	ListDeadLetters(ctx context.Context, filter ports.DeadLetterFilter) ([]ports.DeadLetter, error)
-	ReplayDeadLetter(ctx context.Context, id uuid.UUID, actor, reason string) (uuid.UUID, error)
+	ReplayDeadLetter(ctx context.Context, tenantID, id uuid.UUID, actor, reason string) (uuid.UUID, error)
 }
 
 type DeadLetterHandler struct {
@@ -33,6 +36,9 @@ func (h *DeadLetterHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filter := ports.DeadLetterFilter{Limit: 50}
+	if t := tenantIDFromCtx(r); t != uuid.Nil {
+		filter.TenantID = t
+	}
 	if resolved := r.URL.Query().Get("resolved"); resolved != "" {
 		v := resolved == "true"
 		filter.Resolved = &v
@@ -75,21 +81,19 @@ func (h *DeadLetterHandler) List(w http.ResponseWriter, r *http.Request) {
 		ID            string  `json:"id"`
 		AggregateID   string  `json:"aggregate_id"`
 		EventType     string  `json:"event_type"`
-		ErrorMessage  string  `json:"error_message"`
-		Attempts      int     `json:"attempts"`
-		CreatedAt     string  `json:"created_at"`
+		FailureReason string  `json:"failure_reason"`
+		FailedAt      string  `json:"failed_at"`
 		ResolvedAt    *string `json:"resolved_at,omitempty"`
 		ResolvedBy    *string `json:"resolved_by,omitempty"`
 	}
 	out := make([]letterResponse, 0, len(letters))
 	for _, l := range letters {
 		r := letterResponse{
-			ID:           l.ID.String(),
-			AggregateID:  l.AggregateID.String(),
-			EventType:    l.EventType,
-			ErrorMessage: l.ErrorMessage,
-			Attempts:     l.Attempts,
-			CreatedAt:    l.CreatedAt.Format(time.RFC3339Nano),
+			ID:            l.ID.String(),
+			AggregateID:   l.AggregateID.String(),
+			EventType:     l.EventType,
+			FailureReason: l.FailureReason,
+			FailedAt:      l.FailedAt.Format(time.RFC3339Nano),
 		}
 		if l.ResolvedAt != nil {
 			s := l.ResolvedAt.Format(time.RFC3339Nano)
@@ -120,8 +124,12 @@ func (h *DeadLetterHandler) Replay(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	newID, err := h.svc.ReplayDeadLetter(r.Context(), id, p.UserID, req.Reason)
+	newID, err := h.svc.ReplayDeadLetter(r.Context(), tenantIDFromCtx(r), id, p.UserID, req.Reason)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || strings.Contains(err.Error(), "not found") {
+			writeError(w, r, http.StatusNotFound, "not_found", "dead letter not found")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "replay_failed", err.Error())
 		return
 	}

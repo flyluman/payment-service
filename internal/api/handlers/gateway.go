@@ -89,9 +89,11 @@ func (h *GatewayHandler) List(w http.ResponseWriter, r *http.Request) {
 				if fm.PercentageBPS > 0 {
 					ratio = float64(fm.PercentageBPS) / 100.0
 				}
-				bd := fees.Calculate(amount, currency, chargesCurrency, fixedFee, ratio, rates)
-				_ = fees.Validate(bd)
-				out[i].FeeBreakdown = bd
+				if bd, err := fees.Calculate(amount, currency, chargesCurrency, fixedFee, ratio, rates); err == nil {
+					if verr := fees.Validate(bd); verr == nil {
+						out[i].FeeBreakdown = bd
+					}
+				}
 			}
 		}
 	}

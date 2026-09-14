@@ -77,7 +77,7 @@ func (s Status) IsTerminal() bool {
 var transitionTable = map[Status][]Status{
 	StatusInitiated:  {StatusProcessing, StatusFailed},
 	StatusProcessing: {StatusRefunded, StatusFailed},
-	StatusFailed:     {},
+	StatusFailed:     {StatusProcessing},
 	StatusRefunded:   {},
 }
 
@@ -142,6 +142,10 @@ func (r *Refund) Transition(toState Status) error {
 			if toState.IsTerminal() {
 				now := time.Now().UTC()
 				r.ResolvedAt = &now
+			} else {
+				// Re-entering a non-terminal state (e.g. FAILED → PROCESSING
+				// retry) means the refund is unresolved again.
+				r.ResolvedAt = nil
 			}
 			return nil
 		}

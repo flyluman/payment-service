@@ -1,8 +1,15 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+	"time"
+)
+
+var (
+	stringType   = reflect.TypeOf("")
+	durationType = reflect.TypeOf(time.Duration(0))
 )
 
 // validatableConfig returns a Config that passes every Validate rule, so a test
@@ -48,6 +55,26 @@ func TestValidate_RejectsUnknownPublisher(t *testing.T) {
 	c.Outbox.Publisher = "kafka"
 	if err := Validate(c); err == nil || !strings.Contains(err.Error(), "outbox.publisher") {
 		t.Fatalf("expected unknown-publisher error, got: %v", err)
+	}
+}
+
+func TestIntSecondsToDurationHook_StringSeconds(t *testing.T) {
+	hook := intSecondsToDurationHook()
+	got, err := hook(stringType, durationType, "1800")
+	if err != nil {
+		t.Fatalf("hook errored on bare number string: %v", err)
+	}
+	if d, ok := got.(time.Duration); !ok || d != 1800*time.Second {
+		t.Fatalf("hook returned %v, want 1800s", got)
+	}
+
+	// Non-numeric strings must pass through for StringToTimeDurationHookFunc.
+	got, err = hook(stringType, durationType, "30s")
+	if err != nil {
+		t.Fatalf("hook errored on suffixed string: %v", err)
+	}
+	if s, ok := got.(string); !ok || s != "30s" {
+		t.Fatalf("hook returned %v, want passthrough of \"30s\"", got)
 	}
 }
 

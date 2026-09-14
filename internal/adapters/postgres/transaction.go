@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Masterminds/squirrel"
@@ -151,6 +152,41 @@ WHERE id = $1`, id)
 		_ = r.cache.Set(ctx, txn)
 	}
 	return txn, nil
+}
+
+func (r *TransactionRepository) GetByIDs(ctx context.Context, ids []uuid.UUID) ([]*transaction.Txn, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := readQueryer(ctx, r.db).Query(ctx, `SELECT
+    id, tenant_id, user_id, amount, currency, payment_method, status, capture_mode, version,
+    gateway_id, gateway_reference_id, gateway_idempotency_key,
+    attempted_gateway, actual_gateway, original_gateway,
+    estimated_timeout_seconds, failure_reason, method_details, metadata,
+    description, customer_id, customer_email,
+    cancel_intent, cancel_requested_by, cancel_requested_at, cancel_requested_via,
+    processing_started_at, EXTRACT(EPOCH FROM processing_timeout)::double precision,
+    callback_url, redirect_url, token_hash,
+    gateway_fee_estimate, gateway_fee_currency, gateway_fee_model_version,
+    fee_breakdown,
+    gateway_amount, gateway_currency,
+    created_at, updated_at
+FROM transactions
+WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var txns []*transaction.Txn
+	for rows.Next() {
+		t, err := scanTransaction(rows)
+		if err != nil {
+			return nil, err
+		}
+		txns = append(txns, t)
+	}
+	return txns, rows.Err()
 }
 
 func (r *TransactionRepository) GetByGatewayReference(ctx context.Context, gatewayID, reference string) (*transaction.Txn, error) {
@@ -491,6 +527,13 @@ func (r *TransactionRepository) List(ctx context.Context, filter ports.Transacti
 	if filter.DateTo != nil {
 		dataBuilder = dataBuilder.Where("created_at <= ?", *filter.DateTo)
 	}
+	if filter.Cursor != nil && *filter.Cursor != "" {
+		createdAt, id, err := parseTxnCursor(*filter.Cursor)
+		if err != nil {
+			return nil, fmt.Errorf("parse cursor: %w", err)
+		}
+		dataBuilder = dataBuilder.Where("(created_at, id) < (?, ?)", createdAt, id)
+	}
 
 	dataSQL, dataArgs, err := dataBuilder.ToSql()
 	if err != nil {
@@ -543,4 +586,21 @@ func (r *TransactionRepository) List(ctx context.Context, filter ports.Transacti
 		NextCursor:   nextCursor,
 		HasMore:      hasMore,
 	}, nil
+}
+
+// parseTxnCursor decodes a "RFC3339Nano:UUID" cursor produced by List.
+func parseTxnCursor(cursor string) (time.Time, uuid.UUID, error) {
+	idx := strings.LastIndex(cursor, ":")
+	if idx <= 0 {
+		return time.Time{}, uuid.Nil, fmt.Errorf("malformed cursor %q", cursor)
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, cursor[:idx])
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("malformed cursor timestamp %q", cursor[:idx])
+	}
+	id, err := uuid.Parse(cursor[idx+1:])
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("malformed cursor id %q", cursor[idx+1:])
+	}
+	return createdAt, id, nil
 }

@@ -15,6 +15,17 @@ type CurrencyRate struct {
 	MarkupFixed  float64
 }
 
+// ErrMissingRate is returned when a cross-currency fee calculation is
+// requested but no exchange rate is configured for the pair.
+type ErrMissingRate struct {
+	FromCurrency string
+	ToCurrency   string
+}
+
+func (e ErrMissingRate) Error() string {
+	return fmt.Sprintf("fees: no exchange rate for %s -> %s", e.FromCurrency, e.ToCurrency)
+}
+
 // Breakdown holds the complete fee calculation result in 3 parts:
 //   - Summary: what the user pays (amount, fees, total)
 //   - Fees: how fees are composed (service fee, fixed charge, optional exchange info)
@@ -57,6 +68,10 @@ type Gateway struct {
 // Calculate computes the two-layer fee breakdown:
 //   - Layer 1: exchange rate with markup (currency conversion)
 //   - Layer 2: reverse-inclusive service fee + fixed charge
+//
+// It returns an error when the transaction and gateway charge currencies
+// differ but no exchange rate is configured, so callers never silently
+// compute fees in the wrong currency.
 func Calculate(
 	amount int64,
 	transactionCurrency string,
@@ -64,17 +79,17 @@ func Calculate(
 	fixedCharge float64,
 	serviceFeeRatio float64,
 	rates []CurrencyRate,
-) *Breakdown {
+) (*Breakdown, error) {
 	transactionCurrency = strings.ToUpper(transactionCurrency)
 	gatewayChargesCurrency = strings.ToUpper(gatewayChargesCurrency)
 
 	if transactionCurrency == gatewayChargesCurrency {
-		return calculateSameCurrency(amount, transactionCurrency, fixedCharge, serviceFeeRatio)
+		return calculateSameCurrency(amount, transactionCurrency, fixedCharge, serviceFeeRatio), nil
 	}
 
 	rate := findRate(rates, transactionCurrency, gatewayChargesCurrency)
 	if rate == nil {
-		return calculateSameCurrency(amount, transactionCurrency, fixedCharge, serviceFeeRatio)
+		return nil, ErrMissingRate{FromCurrency: transactionCurrency, ToCurrency: gatewayChargesCurrency}
 	}
 
 	// Layer 1: convert user amount to gateway charges currency with markup
@@ -88,7 +103,10 @@ func Calculate(
 	// Convert each fee component back to user currency for display
 	userServiceFee := convertBack(serviceFeeGW, rates, gatewayChargesCurrency, transactionCurrency)
 	userFixedCharge := convertBack(fixedCharge, rates, gatewayChargesCurrency, transactionCurrency)
-	userTotalFees := userServiceFee + userFixedCharge
+
+	serviceFeeR := int64(math.Ceil(userServiceFee))
+	fixedChargeR := int64(math.Ceil(userFixedCharge))
+	totalFeesR := serviceFeeR + fixedChargeR
 
 	// Exchange rate info
 	effectiveRate := rate.Rate + (rate.Rate/100)*rate.MarkupPct + rate.MarkupFixed
@@ -96,14 +114,14 @@ func Calculate(
 	return &Breakdown{
 		Summary: Summary{
 			Amount:   amount,
-			Fees:     int64(math.Ceil(userTotalFees)),
-			Total:    int64(math.Ceil(float64(amount) + userTotalFees)),
+			Fees:     totalFeesR,
+			Total:    amount + totalFeesR,
 			Currency: transactionCurrency,
 		},
 		Fees: FeeDetail{
-			ServiceFee:  int64(math.Ceil(userServiceFee)),
-			FixedCharge: int64(math.Ceil(userFixedCharge)),
-			Total:       int64(math.Ceil(userTotalFees)),
+			ServiceFee:  serviceFeeR,
+			FixedCharge: fixedChargeR,
+			Total:       totalFeesR,
 			Exchange: &Exchange{
 				BaseRate:  rate.Rate,
 				MarkupPct: rate.MarkupPct,
@@ -114,30 +132,33 @@ func Calculate(
 			Amount:   int64(math.Ceil(gatewayTotal)),
 			Currency: gatewayChargesCurrency,
 		},
-	}
+	}, nil
 }
 
 // calculateSameCurrency handles the case where transaction and gateway use the same currency.
 func calculateSameCurrency(amount int64, currency string, fixedCharge, serviceFeeRatio float64) *Breakdown {
 	baseAmount := float64(amount)
 	serviceFee := computeServiceFee(baseAmount, serviceFeeRatio)
-	totalFees := serviceFee + fixedCharge
-	total := baseAmount + totalFees
+
+	serviceFeeR := int64(math.Ceil(serviceFee))
+	fixedChargeR := int64(math.Ceil(fixedCharge))
+	totalFeesR := serviceFeeR + fixedChargeR
+	totalR := amount + totalFeesR
 
 	return &Breakdown{
 		Summary: Summary{
 			Amount:   amount,
-			Fees:     int64(math.Ceil(totalFees)),
-			Total:    int64(math.Ceil(total)),
+			Fees:     totalFeesR,
+			Total:    totalR,
 			Currency: currency,
 		},
 		Fees: FeeDetail{
-			ServiceFee:  int64(math.Ceil(serviceFee)),
-			FixedCharge: int64(math.Ceil(fixedCharge)),
-			Total:       int64(math.Ceil(totalFees)),
+			ServiceFee:  serviceFeeR,
+			FixedCharge: fixedChargeR,
+			Total:       totalFeesR,
 		},
 		Gateway: &Gateway{
-			Amount:   int64(math.Ceil(total)),
+			Amount:   totalR,
 			Currency: currency,
 		},
 	}
@@ -190,11 +211,20 @@ func Validate(b *Breakdown) error {
 	if b.Summary.Amount <= 0 {
 		return fmt.Errorf("summary.amount must be positive, got %d", b.Summary.Amount)
 	}
-	if b.Summary.Total < b.Summary.Amount {
-		return fmt.Errorf("summary.total (%d) cannot be less than summary.amount (%d)", b.Summary.Total, b.Summary.Amount)
-	}
 	if b.Gateway != nil && b.Gateway.Amount <= 0 {
 		return fmt.Errorf("gateway.amount must be positive, got %d", b.Gateway.Amount)
+	}
+	if b.Summary.Fees != b.Fees.Total {
+		return fmt.Errorf("summary.fees (%d) must equal fees.total (%d)", b.Summary.Fees, b.Fees.Total)
+	}
+	if b.Fees.Total != b.Fees.ServiceFee+b.Fees.FixedCharge {
+		return fmt.Errorf("fees.total (%d) must equal service_fee (%d) + fixed_charge (%d)", b.Fees.Total, b.Fees.ServiceFee, b.Fees.FixedCharge)
+	}
+	if b.Summary.Total != b.Summary.Amount+b.Summary.Fees {
+		return fmt.Errorf("summary.total (%d) must equal summary.amount (%d) + summary.fees (%d)", b.Summary.Total, b.Summary.Amount, b.Summary.Fees)
+	}
+	if b.Gateway != nil && b.Gateway.Currency == b.Summary.Currency && b.Gateway.Amount != b.Summary.Total {
+		return fmt.Errorf("gateway.amount (%d) must equal summary.total (%d) in same-currency breakdown", b.Gateway.Amount, b.Summary.Total)
 	}
 	return nil
 }

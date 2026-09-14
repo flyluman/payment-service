@@ -30,7 +30,7 @@ func NewTenantConfigStore(db *DB, enc Encryptor) *TenantConfigStore {
 var _ ports.TenantConfigStore = (*TenantConfigStore)(nil)
 
 func (s *TenantConfigStore) Get(ctx context.Context, tenantID uuid.UUID, gatewayID string) (*gateway.TenantGatewayConfig, error) {
-	row := s.db.ReadPool().QueryRow(ctx, `SELECT tenant_id, gateway_id, provider, encrypted_config, config_version, is_active, created_at, updated_at
+	row := s.db.Pool().QueryRow(ctx, `SELECT tenant_id, gateway_id, provider, encrypted_config, config_version, is_active, created_at, updated_at
 FROM tenant_gateway_configs
 WHERE tenant_id = $1 AND gateway_id = $2`, tenantID, gatewayID)
 	cfg, err := scanTenantGatewayConfig(row)

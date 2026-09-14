@@ -20,11 +20,13 @@ type stripeWebhookEvent struct {
 	Data struct {
 		Object struct {
 			ID               string       `json:"id"`
+			PaymentIntent    string       `json:"payment_intent"`
 			Status           string       `json:"status"`
+			Refunded         bool         `json:"refunded"`
 			LastPaymentError *stripeError `json:"last_payment_error"`
 			NextAction       *struct {
-				Type           string `json:"type"`
-				RedirectToURL  *struct {
+				Type          string `json:"type"`
+				RedirectToURL *struct {
 					URL string `json:"url"`
 				} `json:"redirect_to_url,omitempty"`
 			} `json:"next_action"`
@@ -37,12 +39,12 @@ type stripeDisputeEvent struct {
 	Type string `json:"type"`
 	Data struct {
 		Object struct {
-			ID            string `json:"id"`
-			PaymentIntent string `json:"payment_intent"`
-			Status        string `json:"status"`
-			Reason        string `json:"reason"`
-			Amount        int64  `json:"amount"`
-			Currency      string `json:"currency"`
+			ID              string `json:"id"`
+			PaymentIntent   string `json:"payment_intent"`
+			Status          string `json:"status"`
+			Reason          string `json:"reason"`
+			Amount          int64  `json:"amount"`
+			Currency        string `json:"currency"`
 			EvidenceDetails struct {
 				DueBy *int64 `json:"due_by"`
 			} `json:"evidence_details"`
@@ -87,12 +89,12 @@ func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret st
 		}
 
 		disputeEv := &ports.GatewayDisputeEvent{
-			GatewayDisputeID:  dev.Data.Object.ID,
+			GatewayDisputeID:   dev.Data.Object.ID,
 			GatewayReferenceID: dev.Data.Object.PaymentIntent,
-			Status:            mapDisputeStatus(dev.Data.Object.Status),
-			Reason:            dev.Data.Object.Reason,
-			Amount:            dev.Data.Object.Amount,
-			Currency:          strings.ToUpper(dev.Data.Object.Currency),
+			Status:             mapDisputeStatus(dev.Data.Object.Status),
+			Reason:             dev.Data.Object.Reason,
+			Amount:             dev.Data.Object.Amount,
+			Currency:           strings.ToUpper(dev.Data.Object.Currency),
 		}
 		if dev.Data.Object.EvidenceDetails.DueBy != nil {
 			t := time.Unix(*dev.Data.Object.EvidenceDetails.DueBy, 0).UTC()
@@ -113,12 +115,20 @@ func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret st
 		return nil, ports.ErrWebhookParse
 	}
 
+	// charge.* webhooks carry the charge object, whose id is a charge_..., not
+	// the payment_intent we persist as gateway_reference_id. Resolve the PI
+	// from the charge's payment_intent field, falling back to the charge id.
+	reference := ev.Data.Object.PaymentIntent
+	if reference == "" {
+		reference = ev.Data.Object.ID
+	}
+
 	return &ports.GatewayWebhookEvent{
 		EventID:            ev.ID,
-		GatewayReferenceID: ev.Data.Object.ID,
-		Status:             mapStatusString(ev.Data.Object.Status, ev.Data.Object.LastPaymentError != nil),
+		GatewayReferenceID: reference,
+		Status:             mapStatusString(ev.Data.Object.Status, ev.Data.Object.LastPaymentError != nil, ev.Data.Object.Refunded),
 		EventType:          ev.Type,
-		GatewayMetadata: extractStripeWebhookMetadata(ev),
+		GatewayMetadata:    extractStripeWebhookMetadata(ev),
 	}, nil
 }
 
@@ -141,9 +151,12 @@ func parseStripeSignature(header string) (ts int64, v1 string, ok bool) {
 	return ts, v1, true
 }
 
-func mapStatusString(s string, hasError bool) ports.GatewayPaymentStatus {
+func mapStatusString(s string, hasError, refunded bool) ports.GatewayPaymentStatus {
 	if hasError {
 		return ports.GatewayPaymentStatusFailed
+	}
+	if refunded {
+		return ports.GatewayPaymentStatusRefunded
 	}
 	switch s {
 	case "succeeded":

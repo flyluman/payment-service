@@ -37,7 +37,15 @@ func (h *TenantWebhookConfigHandler) List(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	configs, err := h.store.List(r.Context())
+	var (
+		configs []*ports.TenantWebhookConfig
+		err     error
+	)
+	if t := tenantIDFromCtx(r); t != uuid.Nil {
+		configs, err = h.store.ListByTenant(r.Context(), t)
+	} else {
+		configs, err = h.store.List(r.Context())
+	}
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "list_failed", "could not list webhook configs")
 		return
@@ -48,7 +56,7 @@ func (h *TenantWebhookConfigHandler) List(w http.ResponseWriter, r *http.Request
 		out = append(out, twhConfigResponse{
 			TenantID:      c.TenantID.String(),
 			EndpointURL:   c.EndpointURL,
-			SigningSecret: c.SigningSecret,
+			SigningSecret: redactSecret(c.SigningSecret),
 			IsActive:      c.IsActive,
 		})
 	}
@@ -64,6 +72,11 @@ func (h *TenantWebhookConfigHandler) Upsert(w http.ResponseWriter, r *http.Reque
 	tenantID, err := uuid.Parse(r.PathValue("tenant_id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_tenant_id", "tenant_id must be a valid UUID")
+		return
+	}
+
+	if t := tenantIDFromCtx(r); t != uuid.Nil && t != tenantID {
+		writeError(w, r, http.StatusForbidden, "forbidden", "cannot manage another tenant's webhook config")
 		return
 	}
 
@@ -97,7 +110,17 @@ func (h *TenantWebhookConfigHandler) Upsert(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, r, http.StatusOK, twhConfigResponse{
 		TenantID:      cfg.TenantID.String(),
 		EndpointURL:   cfg.EndpointURL,
-		SigningSecret: cfg.SigningSecret,
+		SigningSecret: redactSecret(cfg.SigningSecret),
 		IsActive:      cfg.IsActive,
 	})
+}
+
+func redactSecret(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	if len(secret) <= 4 {
+		return "****"
+	}
+	return "****" + secret[len(secret)-4:]
 }

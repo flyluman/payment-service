@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -19,7 +20,7 @@ var ErrNotRefundable = errors.New("refund: transaction is not in a refundable st
 
 func isRefundableStatus(s transaction.Status) bool {
 	switch s {
-	case transaction.StatusCaptured, transaction.StatusSettled, transaction.StatusPartiallyRefunded:
+	case transaction.StatusCaptured, transaction.StatusSettled, transaction.StatusPartiallyRefunded, transaction.StatusRefundFailed:
 		return true
 	}
 	return false
@@ -36,6 +37,8 @@ type RefundRepo interface {
 	Insert(ctx context.Context, rf *refund.Refund) error
 	GetByID(ctx context.Context, id uuid.UUID) (*refund.Refund, error)
 	UpdateStatus(ctx context.Context, rf *refund.Refund) error
+	ClaimProcessing(ctx context.Context, rf *refund.Refund) (bool, error)
+	ListStaleRefunds(ctx context.Context, olderThan time.Duration, maxAttempts, limit int) ([]uuid.UUID, error)
 	ExistsByReason(ctx context.Context, transactionID uuid.UUID, reason string) (bool, error)
 }
 

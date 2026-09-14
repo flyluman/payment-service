@@ -1,12 +1,25 @@
 package fees
 
 import (
+	"errors"
 	"math"
 	"testing"
 )
 
+func mustCalculate(t *testing.T, amount int64, transactionCurrency, gatewayChargesCurrency string, fixedCharge, serviceFeeRatio float64, rates []CurrencyRate) *Breakdown {
+	t.Helper()
+	b, err := Calculate(amount, transactionCurrency, gatewayChargesCurrency, fixedCharge, serviceFeeRatio, rates)
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	if err := Validate(b); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	return b
+}
+
 func TestCalculate_SameCurrency_NoFees(t *testing.T) {
-	b := Calculate(50000, "IQD", "IQD", 0, 0, nil)
+	b := mustCalculate(t, 50000, "IQD", "IQD", 0, 0, nil)
 	if b.Summary.Amount != 50000 {
 		t.Errorf("summary.amount: got %d, want 50000", b.Summary.Amount)
 	}
@@ -29,7 +42,7 @@ func TestCalculate_SameCurrency_NoFees(t *testing.T) {
 
 func TestCalculate_SameCurrency_WithFees(t *testing.T) {
 	// 2.5% reverse-inclusive service fee + 500 fixed charge
-	b := Calculate(10000, "IQD", "IQD", 500, 2.5, nil)
+	b := mustCalculate(t, 10000, "IQD", "IQD", 500, 2.5, nil)
 
 	expectedServiceFee := 10000.0/0.975 - 10000.0
 	if math.Abs(float64(b.Fees.ServiceFee)-expectedServiceFee) > 1 {
@@ -48,7 +61,7 @@ func TestCalculate_SameCurrency_WithFees(t *testing.T) {
 }
 
 func TestCalculate_SameCurrency_FixedOnly(t *testing.T) {
-	b := Calculate(10000, "IQD", "IQD", 500, 0, nil)
+	b := mustCalculate(t, 10000, "IQD", "IQD", 500, 0, nil)
 	if b.Fees.FixedCharge != 500 {
 		t.Errorf("fees.fixed_charge: got %d, want 500", b.Fees.FixedCharge)
 	}
@@ -61,7 +74,7 @@ func TestCalculate_SameCurrency_FixedOnly(t *testing.T) {
 }
 
 func TestCalculate_SameCurrency_PercentageOnly(t *testing.T) {
-	b := Calculate(10000, "IQD", "IQD", 0, 5.0, nil)
+	b := mustCalculate(t, 10000, "IQD", "IQD", 0, 5.0, nil)
 	expectedServiceFee := 10000.0/0.95 - 10000.0
 	if math.Abs(float64(b.Fees.ServiceFee)-expectedServiceFee) > 1 {
 		t.Errorf("fees.service_fee: got %d, want ~%d", b.Fees.ServiceFee, int64(math.Ceil(expectedServiceFee)))
@@ -78,7 +91,7 @@ func TestCalculate_CrossCurrency_WithMarkup(t *testing.T) {
 	}
 
 	// $10 USD -> IQD gateway, with 2.5% service fee + 500 fixed
-	b := Calculate(10, "USD", "IQD", 500, 2.5, rates)
+	b := mustCalculate(t, 10, "USD", "IQD", 500, 2.5, rates)
 
 	if b.Gateway == nil {
 		t.Fatal("gateway should not be nil for cross currency")
@@ -101,15 +114,43 @@ func TestCalculate_CrossCurrency_WithMarkup(t *testing.T) {
 	}
 }
 
-func TestCalculate_NoExchangeRate_SameCurrencyFallback(t *testing.T) {
-	b := Calculate(10000, "IQD", "IQD", 500, 2.5, nil)
+func TestCalculate_MissingCrossCurrencyRate(t *testing.T) {
+	_, err := Calculate(10000, "USD", "IQD", 500, 2.5, nil)
+	var missing ErrMissingRate
+	if !errors.As(err, &missing) {
+		t.Fatalf("expected ErrMissingRate, got %v", err)
+	}
+	if missing.FromCurrency != "USD" || missing.ToCurrency != "IQD" {
+		t.Errorf("unexpected currencies: %s -> %s", missing.FromCurrency, missing.ToCurrency)
+	}
+}
+
+func TestCalculate_ComponentsReconcile(t *testing.T) {
+	// Pick values whose individual ceilings differ from the ceiling of the sum.
+	b := mustCalculate(t, 100, "IQD", "IQD", 33, 2.5, nil)
+	if b.Summary.Fees != b.Fees.Total {
+		t.Errorf("summary.fees (%d) != fees.total (%d)", b.Summary.Fees, b.Fees.Total)
+	}
+	if b.Fees.Total != b.Fees.ServiceFee+b.Fees.FixedCharge {
+		t.Errorf("fees.total (%d) != service_fee (%d) + fixed_charge (%d)", b.Fees.Total, b.Fees.ServiceFee, b.Fees.FixedCharge)
+	}
+	if b.Summary.Total != b.Summary.Amount+b.Summary.Fees {
+		t.Errorf("summary.total (%d) != amount (%d) + fees (%d)", b.Summary.Total, b.Summary.Amount, b.Summary.Fees)
+	}
+	if b.Gateway.Amount != b.Summary.Total {
+		t.Errorf("gateway.amount (%d) != summary.total (%d)", b.Gateway.Amount, b.Summary.Total)
+	}
+}
+
+func TestCalculate_NoExchangeRate_SameCurrency(t *testing.T) {
+	b := mustCalculate(t, 10000, "IQD", "IQD", 500, 2.5, nil)
 	if b.Summary.Total <= 10000 {
 		t.Errorf("summary.total should be > base when fees applied, got %d", b.Summary.Total)
 	}
 }
 
 func TestCalculate_RoundUp(t *testing.T) {
-	b := Calculate(100, "IQD", "IQD", 33, 2.5, nil)
+	b := mustCalculate(t, 100, "IQD", "IQD", 33, 2.5, nil)
 	expectedTotal := int64(math.Ceil(float64(b.Summary.Amount) + float64(b.Fees.Total)))
 	if b.Summary.Total != expectedTotal {
 		t.Errorf("summary.total: got %d, want %d", b.Summary.Total, expectedTotal)
@@ -181,7 +222,8 @@ func TestFindRate_NotFound(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	b := &Breakdown{
-		Summary: Summary{Amount: 10000, Total: 10500},
+		Summary: Summary{Amount: 10000, Fees: 500, Total: 10500},
+		Fees:    FeeDetail{ServiceFee: 500, FixedCharge: 0, Total: 500},
 		Gateway: &Gateway{Amount: 10500, Currency: "IQD"},
 	}
 	if err := Validate(b); err != nil {
@@ -193,10 +235,19 @@ func TestValidate(t *testing.T) {
 	}
 
 	b2 := &Breakdown{
-		Summary: Summary{Amount: 0, Total: 0},
+		Summary: Summary{Amount: 0, Fees: 0, Total: 0},
 		Gateway: &Gateway{Amount: 0, Currency: "IQD"},
 	}
 	if err := Validate(b2); err == nil {
 		t.Error("expected error for zero amount")
+	}
+
+	inconsistent := &Breakdown{
+		Summary: Summary{Amount: 10000, Fees: 500, Total: 10500},
+		Fees:    FeeDetail{ServiceFee: 400, FixedCharge: 100, Total: 600},
+		Gateway: &Gateway{Amount: 10600, Currency: "IQD"},
+	}
+	if err := Validate(inconsistent); err == nil {
+		t.Error("expected error for inconsistent fee components")
 	}
 }

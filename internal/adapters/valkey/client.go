@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,22 +34,24 @@ func New(cfg config.ValkeyConfig) (*Client, error) {
 	}
 
 	rl, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress:      cfg.Addrs,
-		SelectDB:         cfg.RateLimitDB,
-		ConnWriteTimeout: cfg.WriteTimeout,
+		InitAddress:       cfg.Addrs,
+		SelectDB:          cfg.RateLimitDB,
+		Dialer:            net.Dialer{Timeout: cfg.DialTimeout},
+		ConnWriteTimeout:  cfg.WriteTimeout,
 		ForceSingleClient: true,
-		DisableCache:     true,
+		DisableCache:      true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("valkey: rate_limit client: %w", err)
 	}
 
 	ca, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress:      cfg.Addrs,
-		SelectDB:         cfg.CacheDB,
-		ConnWriteTimeout: cfg.WriteTimeout,
+		InitAddress:       cfg.Addrs,
+		SelectDB:          cfg.CacheDB,
+		Dialer:            net.Dialer{Timeout: cfg.DialTimeout},
+		ConnWriteTimeout:  cfg.WriteTimeout,
 		ForceSingleClient: true,
-		DisableCache:     true,
+		DisableCache:      true,
 	})
 	if err != nil {
 		rl.Close()
@@ -107,7 +110,7 @@ func (c *Client) Del(ctx context.Context, id uuid.UUID) error {
 	return c.Cache.Do(ctx, c.Cache.B().Del().Key(txnCacheKey(id)).Build()).Error()
 }
 
-func configCacheKey(gatewayID string) string  { return "cfg:gw:" + gatewayID }
+func configCacheKey(gatewayID string) string { return "cfg:gw:" + gatewayID }
 func timeoutCacheKey(gatewayID, method string) string {
 	return "cfg:to:" + gatewayID + ":" + method
 }

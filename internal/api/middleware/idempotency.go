@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/crownroutes/payment-service/internal/ports"
@@ -30,7 +31,13 @@ func ResponseCache(cache ResponseCacheStore, log ports.Logger) func(http.Handler
 				return
 			}
 
-			composite := cacheKey(r, key)
+			bodyHash, err := readBodyHash(r)
+			if err != nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			composite := cacheKey(r, key, bodyHash)
 
 			if found, body, err := cache.Get(r.Context(), composite); err == nil && found {
 				replayCached(w, body, log)
@@ -49,9 +56,25 @@ func ResponseCache(cache ResponseCacheStore, log ports.Logger) func(http.Handler
 	}
 }
 
-func cacheKey(r *http.Request, key string) string {
+func cacheKey(r *http.Request, key, bodyHash string) string {
 	tenant := TenantIDFromContext(r.Context())
-	return hashString(tenant + ":" + r.Method + " " + r.URL.Path + ":" + key)
+	user := UserIDFromContext(r.Context())
+	return hashString(tenant + ":" + user + ":" + r.Method + " " + r.URL.Path + ":" + key + ":" + bodyHash)
+}
+
+// readBodyHash reads the request body, computes a SHA-256 hash of it, and
+// restores the body so downstream handlers can still read it.
+func readBodyHash(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return hashString(""), nil
+	}
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 type responseRecorder struct {

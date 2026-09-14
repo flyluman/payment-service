@@ -22,9 +22,9 @@ func NewReconciliationStore(db *DB) *ReconciliationStore {
 
 func (s *ReconciliationStore) CreateJob(ctx context.Context, job *reconciliation.Job) error {
 	_, err := s.db.Pool().Exec(ctx, `INSERT INTO reconciliation_jobs
-		(id, gateway_id, transaction_id, period_start, period_end, status, triggered_by, actor, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		job.ID, job.GatewayID, job.TransactionID, job.PeriodStart, job.PeriodEnd,
+		(id, gateway_id, tenant_id, transaction_id, period_start, period_end, status, triggered_by, actor, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		job.ID, job.GatewayID, job.TenantID, job.TransactionID, job.PeriodStart, job.PeriodEnd,
 		string(job.Status), string(job.TriggeredBy), job.Actor, job.CreatedAt,
 	)
 	if err != nil {
@@ -47,14 +47,14 @@ func (s *ReconciliationStore) UpdateJob(ctx context.Context, job *reconciliation
 
 func (s *ReconciliationStore) GetJob(ctx context.Context, id uuid.UUID) (*reconciliation.Job, error) {
 	row := s.db.Pool().QueryRow(ctx, `SELECT
-		id, gateway_id, transaction_id, period_start, period_end,
+		id, gateway_id, tenant_id, transaction_id, period_start, period_end,
 		status, triggered_by, actor, mismatch_count, error,
 		started_at, completed_at, created_at
 		FROM reconciliation_jobs WHERE id = $1`, id)
 
 	var job reconciliation.Job
 	err := row.Scan(
-		&job.ID, &job.GatewayID, &job.TransactionID, &job.PeriodStart, &job.PeriodEnd,
+		&job.ID, &job.GatewayID, &job.TenantID, &job.TransactionID, &job.PeriodStart, &job.PeriodEnd,
 		&job.Status, &job.TriggeredBy, &job.Actor, &job.MismatchCount, &job.Error,
 		&job.StartedAt, &job.CompletedAt, &job.CreatedAt,
 	)
@@ -68,7 +68,7 @@ func (s *ReconciliationStore) GetJob(ctx context.Context, id uuid.UUID) (*reconc
 }
 
 func (s *ReconciliationStore) ListJobs(ctx context.Context, filter ports.ReconciliationJobFilter) ([]*reconciliation.Job, error) {
-	query := `SELECT id, gateway_id, transaction_id, period_start, period_end,
+	query := `SELECT id, gateway_id, tenant_id, transaction_id, period_start, period_end,
 		status, triggered_by, actor, mismatch_count, error,
 		started_at, completed_at, created_at
 		FROM reconciliation_jobs WHERE 1=1`
@@ -78,6 +78,16 @@ func (s *ReconciliationStore) ListJobs(ctx context.Context, filter ports.Reconci
 	if filter.GatewayID != nil {
 		query += fmt.Sprintf(" AND gateway_id = $%d", argIdx)
 		args = append(args, *filter.GatewayID)
+		argIdx++
+	}
+	if filter.Actor != nil {
+		query += fmt.Sprintf(" AND actor = $%d", argIdx)
+		args = append(args, *filter.Actor)
+		argIdx++
+	}
+	if filter.TenantID != nil {
+		query += fmt.Sprintf(" AND tenant_id = $%d", argIdx)
+		args = append(args, *filter.TenantID)
 		argIdx++
 	}
 	if filter.Status != nil {
@@ -126,7 +136,7 @@ func (s *ReconciliationStore) ListJobs(ctx context.Context, filter ports.Reconci
 	for rows.Next() {
 		var j reconciliation.Job
 		if err := rows.Scan(
-			&j.ID, &j.GatewayID, &j.TransactionID, &j.PeriodStart, &j.PeriodEnd,
+			&j.ID, &j.GatewayID, &j.TenantID, &j.TransactionID, &j.PeriodStart, &j.PeriodEnd,
 			&j.Status, &j.TriggeredBy, &j.Actor, &j.MismatchCount, &j.Error,
 			&j.StartedAt, &j.CompletedAt, &j.CreatedAt,
 		); err != nil {
@@ -218,6 +228,31 @@ func (s *ReconciliationStore) GetEntries(ctx context.Context, jobID uuid.UUID, f
 	return entries, rows.Err()
 }
 
+func (s *ReconciliationStore) GetEntry(ctx context.Context, entryID uuid.UUID) (*reconciliation.Entry, error) {
+	row := s.db.Pool().QueryRow(ctx, `SELECT id, job_id, transaction_id, internal_status, gateway_status,
+		internal_amount, gateway_amount, internal_fees, gateway_fees,
+		fx_rate_applied, fx_rate_at_settlement, fee_mismatch_reason,
+		mismatch_type, resolution_status, resolved_by, resolved_at, notes,
+		auto_resolution_action, auto_resolution_at, auto_resolution_by, created_at
+		FROM reconciliation_entries WHERE id = $1`, entryID)
+
+	var e reconciliation.Entry
+	err := row.Scan(
+		&e.ID, &e.JobID, &e.TransactionID, &e.InternalStatus, &e.GatewayStatus,
+		&e.InternalAmount, &e.GatewayAmount, &e.InternalFees, &e.GatewayFees,
+		&e.FXRateApplied, &e.FXRateAtSettlement, &e.FeeMismatchReason,
+		&e.MismatchType, &e.ResolutionStatus, &e.ResolvedBy, &e.ResolvedAt, &e.Notes,
+		&e.AutoResolutionAction, &e.AutoResolutionAt, &e.AutoResolutionBy, &e.CreatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reconciliation: get entry: %w", err)
+	}
+	return &e, nil
+}
+
 func (s *ReconciliationStore) UpdateEntry(ctx context.Context, entry *reconciliation.Entry) error {
 	_, err := s.db.Pool().Exec(ctx, `UPDATE reconciliation_entries SET
 		resolution_status = $1, resolved_by = $2, resolved_at = $3, notes = $4,
@@ -237,7 +272,7 @@ func (s *ReconciliationStore) GetPendingJobs(ctx context.Context, limit int) ([]
 		limit = 5
 	}
 	rows, err := s.db.Pool().Query(ctx, `SELECT
-		id, gateway_id, transaction_id, period_start, period_end,
+		id, gateway_id, tenant_id, transaction_id, period_start, period_end,
 		status, triggered_by, actor, mismatch_count, error,
 		started_at, completed_at, created_at
 		FROM reconciliation_jobs
@@ -253,7 +288,7 @@ func (s *ReconciliationStore) GetPendingJobs(ctx context.Context, limit int) ([]
 	for rows.Next() {
 		var j reconciliation.Job
 		if err := rows.Scan(
-			&j.ID, &j.GatewayID, &j.TransactionID, &j.PeriodStart, &j.PeriodEnd,
+			&j.ID, &j.GatewayID, &j.TenantID, &j.TransactionID, &j.PeriodStart, &j.PeriodEnd,
 			&j.Status, &j.TriggeredBy, &j.Actor, &j.MismatchCount, &j.Error,
 			&j.StartedAt, &j.CompletedAt, &j.CreatedAt,
 		); err != nil {

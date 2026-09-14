@@ -37,6 +37,7 @@ type outcome struct {
 func (s *Service) checkStatus(ctx context.Context, adapter ports.GatewayAdapter, txn *transaction.Txn) (*ports.GatewayPaymentResponse, *ports.GatewayError) {
 	resp, err := adapter.CheckStatus(ctx, ports.GatewayStatusRequest{
 		TransactionID:      txn.ID,
+		TenantID:           txn.TenantID,
 		GatewayReferenceID: txn.GatewayReferenceID,
 		IdempotencyKey:     txn.GatewayIdempotencyKey,
 	})
@@ -57,7 +58,9 @@ func (s *Service) checkStatus(ctx context.Context, adapter ports.GatewayAdapter,
 
 func (s *Service) finalize(ctx context.Context, txn *transaction.Txn, resp *ports.GatewayPaymentResponse, result outcome) (*transaction.Txn, error) {
 	if resp != nil {
-		txn.GatewayReferenceID = resp.GatewayReferenceID
+		if resp.GatewayReferenceID != "" {
+			txn.GatewayReferenceID = resp.GatewayReferenceID
+		}
 		if md := toMethodDetails(resp.MethodResponse); md != nil {
 			txn.MethodDetails = md
 		}
@@ -74,6 +77,7 @@ func (s *Service) finalize(ctx context.Context, txn *transaction.Txn, resp *port
 
 	err = s.tx.WithinTx(ctx, func(ctx context.Context) error {
 		if result.terminal {
+			previous := txn.Status
 			if err := transaction.TransitionState(txn, result.newStatus, transaction.ActorGateway); err != nil {
 				return err
 			}
@@ -83,7 +87,7 @@ func (s *Service) finalize(ctx context.Context, txn *transaction.Txn, resp *port
 					TransactionID: &txn.ID,
 					EventType:     ports.AuditEventTypeStateChange,
 					Actor:         string(transaction.ActorGateway),
-					PreviousState: string(transaction.StatusProcessing),
+					PreviousState: string(previous),
 					NewState:      string(result.newStatus),
 					Reason:        "gateway_finalize",
 				})
@@ -97,8 +101,10 @@ func (s *Service) finalize(ctx context.Context, txn *transaction.Txn, resp *port
 			if err != nil {
 				return err
 			}
-			if err := s.outbox.Write(ctx, *event); err != nil {
-				return err
+			if event != nil {
+				if err := s.outbox.Write(ctx, *event); err != nil {
+					return err
+				}
 			}
 			if txn.CallbackURL != "" {
 				cbPayload, err := json.Marshal(map[string]any{
@@ -233,11 +239,12 @@ func isGatewayHealthFailure(gwErr *ports.GatewayError) bool {
 }
 
 func (s *Service) callGateway(ctx context.Context, adapter ports.GatewayAdapter, txn *transaction.Txn) (*ports.GatewayPaymentResponse, *ports.GatewayError) {
+	gwAmount, gwCurrency := gatewayAmountFor(txn)
 	resp, err := adapter.InitiatePayment(ctx, ports.GatewayPaymentRequest{
 		TransactionID:  txn.ID,
 		TenantID:       txn.TenantID,
-		Amount:         txn.Amount,
-		Currency:       txn.Currency,
+		Amount:         gwAmount,
+		Currency:       gwCurrency,
 		PaymentMethod:  txn.PaymentMethod,
 		IdempotencyKey: txn.GatewayIdempotencyKey,
 		Metadata:       txn.Metadata,
@@ -258,6 +265,16 @@ func (s *Service) callGateway(ctx context.Context, adapter ports.GatewayAdapter,
 		}
 	}
 	return resp, nil
+}
+
+// gatewayAmountFor returns the fee-inclusive amount the gateway must be charged
+// (persisted during ProcessGatewayInitiate), falling back to the nominal
+// transaction amount/currency when fees were not applied.
+func gatewayAmountFor(txn *transaction.Txn) (int64, string) {
+	if txn.GatewayAmount != nil {
+		return *txn.GatewayAmount, txn.GatewayCurrency
+	}
+	return txn.Amount, txn.Currency
 }
 
 func resolveOutcome(resp *ports.GatewayPaymentResponse, gwErr *ports.GatewayError) outcome {
@@ -295,6 +312,94 @@ func resolveOutcome(resp *ports.GatewayPaymentResponse, gwErr *ports.GatewayErro
 				Source:         transaction.FailureReasonSourceGateway,
 			},
 		}
+	case ports.GatewayPaymentStatusCancelled:
+		return outcome{terminal: true, newStatus: transaction.StatusCancelled}
+	default:
+		return outcome{terminal: false}
+	}
+}
+
+// resolveAuthorizeOutcome maps the response of an InitiatePayment call in the
+// manual-capture flow. Succeeded/Pending leave the payment authorized for a
+// later Capture; unknown statuses stay non-terminal so the lease-expiry reaper
+// re-checks via CheckStatus.
+func resolveAuthorizeOutcome(resp *ports.GatewayPaymentResponse, gwErr *ports.GatewayError) outcome {
+	if gwErr != nil {
+		if gwErr.Category == ports.ErrorCategoryAmbiguous || gwErr.Category == ports.ErrorCategoryNetworkTimeout {
+			return outcome{terminal: false}
+		}
+		return outcome{
+			terminal:  true,
+			newStatus: transaction.StatusFailed,
+			failureReason: &transaction.FailureReason{
+				Category:       string(gwErr.Category),
+				Code:           gwErr.Code,
+				GatewayCode:    gwErr.GatewayCode,
+				GatewayMessage: gwErr.GatewayMessage,
+				Source:         transaction.FailureReasonSourceGateway,
+			},
+		}
+	}
+
+	switch resp.Status {
+	case ports.GatewayPaymentStatusSucceeded, ports.GatewayPaymentStatusPending, ports.GatewayPaymentStatusAuthorized:
+		return outcome{terminal: true, newStatus: transaction.StatusAuthorized}
+	case ports.GatewayPaymentStatusFailed:
+		return outcome{
+			terminal:  true,
+			newStatus: transaction.StatusFailed,
+			failureReason: &transaction.FailureReason{
+				Category:       "gateway_declined",
+				Code:           resp.ErrorCode,
+				GatewayCode:    resp.ErrorCode,
+				GatewayMessage: resp.ErrorMessage,
+				Source:         transaction.FailureReasonSourceGateway,
+			},
+		}
+	case ports.GatewayPaymentStatusCancelled:
+		return outcome{terminal: true, newStatus: transaction.StatusCancelled}
+	default:
+		return outcome{terminal: false}
+	}
+}
+
+// resolveCaptureOutcome maps the response of a CapturePayment call in the
+// manual-capture flow. Unknown statuses stay non-terminal for reaper recovery.
+func resolveCaptureOutcome(resp *ports.GatewayPaymentResponse, gwErr *ports.GatewayError) outcome {
+	if gwErr != nil {
+		if gwErr.Category == ports.ErrorCategoryAmbiguous || gwErr.Category == ports.ErrorCategoryNetworkTimeout {
+			return outcome{terminal: false}
+		}
+		return outcome{
+			terminal:  true,
+			newStatus: transaction.StatusFailed,
+			failureReason: &transaction.FailureReason{
+				Category:       string(gwErr.Category),
+				Code:           gwErr.Code,
+				GatewayCode:    gwErr.GatewayCode,
+				GatewayMessage: gwErr.GatewayMessage,
+				Source:         transaction.FailureReasonSourceGateway,
+			},
+		}
+	}
+
+	switch resp.Status {
+	case ports.GatewayPaymentStatusSucceeded:
+		return outcome{terminal: true, newStatus: transaction.StatusCaptured}
+	case ports.GatewayPaymentStatusFailed:
+		return outcome{
+			terminal:  true,
+			newStatus: transaction.StatusFailed,
+			failureReason: &transaction.FailureReason{
+				Category:       "gateway_declined",
+				Code:           resp.ErrorCode,
+				GatewayCode:    resp.ErrorCode,
+				GatewayMessage: resp.ErrorMessage,
+				Source:         transaction.FailureReasonSourceGateway,
+			},
+		}
+	case ports.GatewayPaymentStatusCancelled:
+		return outcome{terminal: true, newStatus: transaction.StatusCancelled}
 	default:
 		return outcome{terminal: false}
 	}
@@ -308,12 +413,15 @@ func (o outcome) newStatusOr(current transaction.Status) transaction.Status {
 }
 
 func (s *Service) buildTerminalEvent(txn *transaction.Txn, status transaction.Status) (*ports.OutboxEvent, error) {
-	eventType := ports.EventTypeTransactionFailed
-	switch status {
-	case transaction.StatusCaptured:
-		eventType = ports.EventTypeTransactionCaptured
-	case transaction.StatusCancelled:
-		eventType = ports.EventTypeTransactionCancelled
+	eventType, ok := ports.EventTypeForTransactionStatus(status)
+	if !ok {
+		s.log.Warn(ports.LogEventOutboxPublish, map[string]any{
+			ports.FieldTransactionID: txn.ID.String(),
+			"event_type":             "none",
+			"status":                 string(status),
+			"warning":                "no downstream event type for status; skipping publish",
+		})
+		return nil, nil
 	}
 
 	payload, err := json.Marshal(transactionTerminalPayload{
@@ -356,12 +464,18 @@ func (s *Service) recordOutcome(txn *transaction.Txn, result outcome) {
 			ports.FieldNewState:      string(transaction.StatusCaptured),
 		})
 		s.metrics.Increment(ports.MetricTransactionSucceeded, tags)
-	default:
+	case result.newStatus == transaction.StatusFailed:
 		s.log.Info(ports.LogEventTransactionTransition, map[string]any{
 			ports.FieldTransactionID: txn.ID.String(),
 			ports.FieldNewState:      string(transaction.StatusFailed),
 		})
 		s.metrics.Increment(ports.MetricTransactionFailed, tags)
+	default:
+		// Authorized/Cancelled are intermediate/non-revenue outcomes; log only.
+		s.log.Info(ports.LogEventTransactionTransition, map[string]any{
+			ports.FieldTransactionID: txn.ID.String(),
+			ports.FieldNewState:      string(result.newStatus),
+		})
 	}
 }
 

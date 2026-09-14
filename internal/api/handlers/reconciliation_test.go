@@ -22,7 +22,7 @@ type fakeReconSvc struct {
 	entries []*reconciliation.Entry
 }
 
-func (f *fakeReconSvc) CreateJob(_ context.Context, _ string, _, _ *time.Time, _ *uuid.UUID, _ string) (*reconciliation.Job, error) {
+func (f *fakeReconSvc) CreateJob(_ context.Context, _ string, _ *uuid.UUID, _, _ *time.Time, _ *uuid.UUID, _ string) (*reconciliation.Job, error) {
 	job := &reconciliation.Job{
 		ID:        uuid.New(),
 		Status:    reconciliation.JobStatusPending,
@@ -32,9 +32,9 @@ func (f *fakeReconSvc) CreateJob(_ context.Context, _ string, _, _ *time.Time, _
 	return job, nil
 }
 
-func (f *fakeReconSvc) RunJob(_ context.Context, _ uuid.UUID) error { return nil }
+func (f *fakeReconSvc) RunJob(_ context.Context, _ string, _ uuid.UUID) error { return nil }
 
-func (f *fakeReconSvc) GetJob(_ context.Context, id uuid.UUID) (*reconciliation.Job, error) {
+func (f *fakeReconSvc) GetJob(_ context.Context, _ string, id uuid.UUID) (*reconciliation.Job, error) {
 	for _, j := range f.jobs {
 		if j.ID == id {
 			return j, nil
@@ -47,17 +47,19 @@ func (f *fakeReconSvc) ListJobs(_ context.Context, _ ports.ReconciliationJobFilt
 	return f.jobs, nil
 }
 
-func (f *fakeReconSvc) GetEntries(_ context.Context, _ uuid.UUID, _ ports.ReconciliationEntryFilter) ([]*reconciliation.Entry, error) {
+func (f *fakeReconSvc) GetEntries(_ context.Context, _ string, _ uuid.UUID, _ ports.ReconciliationEntryFilter) ([]*reconciliation.Entry, error) {
 	return f.entries, nil
 }
 
-func (f *fakeReconSvc) ResolveEntry(_ context.Context, _ uuid.UUID, _, _ string) error { return nil }
+func (f *fakeReconSvc) ResolveEntry(_ context.Context, _ string, _ uuid.UUID, _, _ string) error {
+	return nil
+}
 
 // --- tests ---
 
 func TestCreateJob_Success(t *testing.T) {
 	h := NewReconciliationHandler(&fakeReconSvc{})
-	body := `{"gateway_id": "stripe", "period_start": "2026-01-01T00:00:00Z", "period_end": "2026-01-31T23:59:59Z"}`
+	body := `{"gateway_id": "stripe", "tenant_id": "` + uuid.NewString() + `", "period_start": "2026-01-01T00:00:00Z", "period_end": "2026-01-31T23:59:59Z"}`
 	req := httptest.NewRequest("POST", "/api/v1/reconciliation/jobs", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -72,6 +74,20 @@ func TestCreateJob_Success(t *testing.T) {
 	data := resp["data"].(map[string]any)
 	if data["Status"] != "PENDING" {
 		t.Errorf("status: got %v, want PENDING", data["Status"])
+	}
+}
+
+func TestCreateJob_BatchWithoutTenantID(t *testing.T) {
+	h := NewReconciliationHandler(&fakeReconSvc{})
+	body := `{"gateway_id": "stripe", "period_start": "2026-01-01T00:00:00Z", "period_end": "2026-01-31T23:59:59Z"}`
+	req := httptest.NewRequest("POST", "/api/v1/reconciliation/jobs", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.CreateJob(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want 400 (batch jobs require tenant_id)", w.Code)
 	}
 }
 

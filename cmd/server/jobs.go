@@ -10,11 +10,13 @@ import (
 	gatewaymetrics "github.com/crownroutes/payment-service/internal/jobs/gateway_metrics"
 	tenantwebhook "github.com/crownroutes/payment-service/internal/jobs/tenant_webhook"
 	notifprocessor "github.com/crownroutes/payment-service/internal/jobs/notification"
+	refundreaper "github.com/crownroutes/payment-service/internal/jobs/refund_reaper"
 	reconjob "github.com/crownroutes/payment-service/internal/jobs/reconciliation"
 )
 
 const defaultPartitionInterval = time.Hour
 const defaultGatewayMetricsInterval = 5 * time.Minute
+const refundReaperInterval = time.Minute
 
 // startJobs runs the lease_expiry, partition_manager, and gateway_metrics jobs on tickers until
 // ctx is cancelled. It runs each job once immediately, then on its configured
@@ -44,6 +46,17 @@ func startJobs(ctx context.Context, d *deps) error {
 	})
 
 	notifProcessor := notifprocessor.NewProcessor(d.notifSvc, logger)
+
+	refundReaper := refundreaper.New(
+		postgres.NewRefundRepository(d.db),
+		d.refundSvc,
+		logger,
+		refundreaper.Config{
+			StaleAfter:  5 * time.Minute,
+			MaxAttempts: 5,
+			BatchLimit:  100,
+		},
+	)
 
 	leaseInterval := time.Duration(cfg.Jobs.LeaseExpiryIntervalSec) * time.Second
 	if leaseInterval <= 0 {
@@ -83,6 +96,8 @@ func startJobs(ctx context.Context, d *deps) error {
 	defer notifTicker.Stop()
 	reconTicker := time.NewTicker(reconInterval)
 	defer reconTicker.Stop()
+	refundReaperTicker := time.NewTicker(refundReaperInterval)
+	defer refundReaperTicker.Stop()
 
 	logger.Info("jobs.scheduled", map[string]any{
 		"lease_expiry_interval":        leaseInterval.String(),
@@ -91,6 +106,7 @@ func startJobs(ctx context.Context, d *deps) error {
 		"tenant_webhook_interval":      twhInterval.String(),
 		"notification_interval":        notifInterval.String(),
 		"reconciliation_interval":      reconInterval.String(),
+		"refund_reaper_interval":       refundReaperInterval.String(),
 	})
 
 	for {
@@ -110,6 +126,8 @@ func startJobs(ctx context.Context, d *deps) error {
 			runJobOnce(ctx, logger, "notification", func(c context.Context) error { return notifProcessor.RunOnce(c) })
 		case <-reconTicker.C:
 			runJobOnce(ctx, logger, "reconciliation", func(c context.Context) error { return reconScheduler.RunOnce(c) })
+		case <-refundReaperTicker.C:
+			runJobOnce(ctx, logger, "refund_reaper", func(c context.Context) error { return refundReaper.RunOnce(c) })
 		}
 	}
 }
@@ -123,7 +141,7 @@ func runJobOnce(ctx context.Context, logger interface {
 }
 
 func buildReaper(d *deps) *leaseexpiry.Reaper {
-	return leaseexpiry.New(d.txnRepo, d.paymentSvc, d.idempotencyRepo, d.logger, leaseexpiry.Config{
+	return leaseexpiry.New(d.txnRepo, d.paymentSvc, d.idempotencyRepo, d.leaseRepo, d.logger, leaseexpiry.Config{
 		IdempotencyProcessingTimeout: time.Duration(d.cfg.Jobs.IdempotencyProcessingTimeoutSec) * time.Second,
 	})
 }

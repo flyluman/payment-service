@@ -188,10 +188,12 @@ func run() error {
 	paymentSvc.SetGatewayMetadataStore(webhookRepo)
 
 	webhookSvc := webhook.NewService(txnRepo, webhookRepo, outboxWriter, transactor, logger, metrics)
+	webhookSvc.SetCancelResolver(refundSvc)
 
 	disputeStore := postgres.NewDisputeStore(db)
 	disputeEvidenceStore := postgres.NewDisputeEvidenceStore(db)
 	disputeSvc := dispute.NewService(disputeStore, disputeEvidenceStore, txnRepo, transactor)
+	disputeSvc.SetOutboxWriter(outboxWriter)
 
 	notifStore := postgres.NewNotificationStore(db)
 	notifTemplateStore := postgres.NewNotificationTemplateStore(db)

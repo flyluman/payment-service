@@ -9,9 +9,9 @@ import (
 )
 
 type Scheduler struct {
-	store ports.ReconciliationStore
-	svc   *reconapp.Service
-	log   ports.Logger
+	store  ports.ReconciliationStore
+	svc    *reconapp.Service
+	log    ports.Logger
 	config Config
 }
 
@@ -42,7 +42,7 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	}
 
 	for _, job := range jobs {
-		if err := s.svc.RunJob(ctx, job.ID); err != nil {
+		if err := s.svc.RunJob(ctx, "ops", job.ID); err != nil {
 			s.log.Warn("reconciliation.job_failed", map[string]any{
 				"job_id": job.ID.String(),
 				"error":  err.Error(),

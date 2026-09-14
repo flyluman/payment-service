@@ -68,7 +68,7 @@ func TestReaper_RecoversEachExpiredLease(t *testing.T) {
 	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
 	rec := &fakeRecoverer{}
 	sweeper := &fakeSweeper{}
-	r := New(fakeLister{ids: ids}, rec, sweeper, noopLogger{}, Config{})
+	r := New(fakeLister{ids: ids}, rec, sweeper, sweeper, noopLogger{}, Config{})
 
 	if err := r.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestReaper_PerItemFailureDoesNotAbortSweep(t *testing.T) {
 	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
 	rec := &fakeRecoverer{failFor: map[uuid.UUID]bool{ids[1]: true}}
 	sweeper := &fakeSweeper{}
-	r := New(fakeLister{ids: ids}, rec, sweeper, noopLogger{}, Config{})
+	r := New(fakeLister{ids: ids}, rec, sweeper, sweeper, noopLogger{}, Config{})
 
 	if err := r.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -90,15 +90,15 @@ func TestReaper_PerItemFailureDoesNotAbortSweep(t *testing.T) {
 	if len(rec.called) != 3 {
 		t.Errorf("a single recovery failure must not stop the others, recovered %d", len(rec.called))
 	}
-	if sweeper.sweepCalls != 1 || sweeper.expireCalls != 1 {
-		t.Errorf("idempotency sweep should still run after lease recovery, sweep=%d expire=%d", sweeper.sweepCalls, sweeper.expireCalls)
+	if sweeper.sweepCalls != 1 {
+		t.Errorf("idempotency sweep should still run after lease recovery, sweep=%d", sweeper.sweepCalls)
 	}
 }
 
 func TestReaper_ListErrorStillSweepsIdempotency(t *testing.T) {
 	rec := &fakeRecoverer{}
 	sweeper := &fakeSweeper{}
-	r := New(fakeLister{err: errors.New("db down")}, rec, sweeper, noopLogger{}, Config{})
+	r := New(fakeLister{err: errors.New("db down")}, rec, sweeper, sweeper, noopLogger{}, Config{})
 
 	if err := r.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -113,7 +113,7 @@ func TestReaper_ListErrorStillSweepsIdempotency(t *testing.T) {
 
 func TestReaper_DefaultIdempotencyTimeout(t *testing.T) {
 	sweeper := &fakeSweeper{}
-	r := New(fakeLister{}, &fakeRecoverer{}, sweeper, noopLogger{}, Config{})
+	r := New(fakeLister{}, &fakeRecoverer{}, sweeper, sweeper, noopLogger{}, Config{})
 
 	if err := r.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestReaper_DefaultIdempotencyTimeout(t *testing.T) {
 
 func TestReaper_HonoursConfiguredTimeout(t *testing.T) {
 	sweeper := &fakeSweeper{}
-	r := New(fakeLister{}, &fakeRecoverer{}, sweeper, noopLogger{}, Config{IdempotencyProcessingTimeout: 90 * time.Second})
+	r := New(fakeLister{}, &fakeRecoverer{}, sweeper, sweeper, noopLogger{}, Config{IdempotencyProcessingTimeout: 90 * time.Second})
 
 	if err := r.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)

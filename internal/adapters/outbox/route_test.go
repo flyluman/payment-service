@@ -118,6 +118,29 @@ func TestHandlerFuncAdapter(t *testing.T) {
 	}
 }
 
+func TestSpecificRouteBeforeWildcardBlocksWildcardOnError(t *testing.T) {
+	// The relay relies on side-effect routes being registered before the "*"
+	// SNS fan-out: if a side effect fails, the fan-out must not run so the
+	// retry does not publish a duplicate SNS message.
+	sideEffect := &spyHandler{err: errors.New("gateway call failed")}
+	base := &spyHandler{}
+	router := NewRouter(
+		Route{EventType: "GATEWAY_INITIATE", Handler: sideEffect},
+		Route{EventType: "*", Handler: base},
+	)
+
+	err := router.Publish(context.Background(), pendingEvent("GATEWAY_INITIATE"))
+	if err == nil {
+		t.Fatal("expected side-effect error to propagate")
+	}
+	if sideEffect.called != 1 {
+		t.Fatalf("side-effect handler should run once, got %d", sideEffect.called)
+	}
+	if base.called != 0 {
+		t.Fatalf("wildcard fan-out must not run after side-effect error, got %d calls", base.called)
+	}
+}
+
 func TestEmptyRouter(t *testing.T) {
 	router := NewRouter()
 	err := router.Publish(context.Background(), pendingEvent("TEST"))

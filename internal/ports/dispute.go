@@ -23,10 +23,11 @@ type DisputeEvidenceStore interface {
 }
 
 type DisputeFilters struct {
-	Status      *dispute.Status
-	GatewayID   *string
-	DateFrom    *time.Time
-	DateTo      *time.Time
-	Limit       int
-	Offset      int
+	TenantID  uuid.UUID
+	Status    *dispute.Status
+	GatewayID *string
+	DateFrom  *time.Time
+	DateTo    *time.Time
+	Limit     int
+	Offset    int
 }

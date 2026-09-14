@@ -20,7 +20,7 @@ func NewDisputeStore(db *DB) *DisputeStore {
 }
 
 func (s *DisputeStore) Create(ctx context.Context, d *dispute.Dispute) error {
-	_, err := s.db.Pool().Exec(ctx, `
+	_, err := queryer(ctx, s.db.pool).Exec(ctx, `
 		INSERT INTO disputes (id, transaction_id, gateway_id, gateway_dispute_id, reason, status, amount, currency, evidence_due_by, evidence_submitted_at, created_at, resolved_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`, d.ID, d.TransactionID, d.GatewayID, d.GatewayDisputeID, d.Reason, string(d.Status),
@@ -29,7 +29,7 @@ func (s *DisputeStore) Create(ctx context.Context, d *dispute.Dispute) error {
 }
 
 func (s *DisputeStore) GetByID(ctx context.Context, id uuid.UUID) (*dispute.Dispute, error) {
-	row := s.db.Pool().QueryRow(ctx, `
+	row := queryer(ctx, s.db.pool).QueryRow(ctx, `
 		SELECT id, transaction_id, gateway_id, gateway_dispute_id, reason, status, amount, currency,
 		       evidence_due_by, evidence_submitted_at, created_at, resolved_at
 		FROM disputes WHERE id = $1
@@ -38,7 +38,7 @@ func (s *DisputeStore) GetByID(ctx context.Context, id uuid.UUID) (*dispute.Disp
 }
 
 func (s *DisputeStore) GetByGatewayDisputeID(ctx context.Context, gatewayID, gatewayDisputeID string) (*dispute.Dispute, error) {
-	row := s.db.Pool().QueryRow(ctx, `
+	row := queryer(ctx, s.db.pool).QueryRow(ctx, `
 		SELECT id, transaction_id, gateway_id, gateway_dispute_id, reason, status, amount, currency,
 		       evidence_due_by, evidence_submitted_at, created_at, resolved_at
 		FROM disputes WHERE gateway_id = $1 AND gateway_dispute_id = $2
@@ -47,7 +47,7 @@ func (s *DisputeStore) GetByGatewayDisputeID(ctx context.Context, gatewayID, gat
 }
 
 func (s *DisputeStore) Update(ctx context.Context, d *dispute.Dispute) error {
-	_, err := s.db.Pool().Exec(ctx, `
+	_, err := queryer(ctx, s.db.pool).Exec(ctx, `
 		UPDATE disputes
 		SET reason = $2, status = $3, evidence_due_by = $4, evidence_submitted_at = $5, resolved_at = $6
 		WHERE id = $1
@@ -57,35 +57,42 @@ func (s *DisputeStore) Update(ctx context.Context, d *dispute.Dispute) error {
 
 func (s *DisputeStore) List(ctx context.Context, filters ports.DisputeFilters) ([]*dispute.Dispute, error) {
 	query := `
-		SELECT id, transaction_id, gateway_id, gateway_dispute_id, reason, status, amount, currency,
-		       evidence_due_by, evidence_submitted_at, created_at, resolved_at
-		FROM disputes WHERE 1=1
+		SELECT d.id, d.transaction_id, d.gateway_id, d.gateway_dispute_id, d.reason, d.status, d.amount, d.currency,
+		       d.evidence_due_by, d.evidence_submitted_at, d.created_at, d.resolved_at
+		FROM disputes d
+		JOIN transactions t ON t.id = d.transaction_id
+		WHERE 1=1
 	`
 	args := []any{}
 	argIdx := 1
 
+	if filters.TenantID != uuid.Nil {
+		query += " AND t.tenant_id = $" + strconv.Itoa(argIdx)
+		args = append(args, filters.TenantID)
+		argIdx++
+	}
 	if filters.Status != nil {
-		query += " AND status = $" + strconv.Itoa(argIdx)
+		query += " AND d.status = $" + strconv.Itoa(argIdx)
 		args = append(args, string(*filters.Status))
 		argIdx++
 	}
 	if filters.GatewayID != nil {
-		query += " AND gateway_id = $" + strconv.Itoa(argIdx)
+		query += " AND d.gateway_id = $" + strconv.Itoa(argIdx)
 		args = append(args, *filters.GatewayID)
 		argIdx++
 	}
 	if filters.DateFrom != nil {
-		query += " AND created_at >= $" + strconv.Itoa(argIdx)
+		query += " AND d.created_at >= $" + strconv.Itoa(argIdx)
 		args = append(args, *filters.DateFrom)
 		argIdx++
 	}
 	if filters.DateTo != nil {
-		query += " AND created_at <= $" + strconv.Itoa(argIdx)
+		query += " AND d.created_at <= $" + strconv.Itoa(argIdx)
 		args = append(args, *filters.DateTo)
 		argIdx++
 	}
 
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY d.created_at DESC"
 
 	if filters.Limit > 0 {
 		query += " LIMIT $" + strconv.Itoa(argIdx)
@@ -98,7 +105,7 @@ func (s *DisputeStore) List(ctx context.Context, filters ports.DisputeFilters) (
 		argIdx++
 	}
 
-	rows, err := s.db.Pool().Query(ctx, query, args...)
+	rows, err := queryer(ctx, s.db.pool).Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +131,7 @@ func NewDisputeEvidenceStore(db *DB) *DisputeEvidenceStore {
 }
 
 func (s *DisputeEvidenceStore) Add(ctx context.Context, e *dispute.Evidence) error {
-	_, err := s.db.Pool().Exec(ctx, `
+	_, err := queryer(ctx, s.db.pool).Exec(ctx, `
 		INSERT INTO dispute_evidence (id, dispute_id, evidence_type, file_url, notes, submitted_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 	`, e.ID, e.DisputeID, string(e.Type), e.FileURL, e.Notes, e.SubmittedAt)
@@ -132,7 +139,7 @@ func (s *DisputeEvidenceStore) Add(ctx context.Context, e *dispute.Evidence) err
 }
 
 func (s *DisputeEvidenceStore) ListByDisputeID(ctx context.Context, disputeID uuid.UUID) ([]*dispute.Evidence, error) {
-	rows, err := s.db.Pool().Query(ctx, `
+	rows, err := queryer(ctx, s.db.pool).Query(ctx, `
 		SELECT id, dispute_id, evidence_type, file_url, notes, submitted_at
 		FROM dispute_evidence WHERE dispute_id = $1 ORDER BY submitted_at ASC
 	`, disputeID)

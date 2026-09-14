@@ -1,6 +1,7 @@
 package gateways
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -58,6 +59,33 @@ func (r *Registry) WebhookParser(gatewayID string) (ports.GatewayWebhookParser, 
 	}
 	parser, ok := adapter.(ports.GatewayWebhookParser)
 	return parser, ok
+}
+
+// WebhookRequiresRefetch reports whether a gateway's webhook payloads are
+// unsigned and must therefore be re-verified via CheckStatus.
+func (r *Registry) WebhookRequiresRefetch(gatewayID string) bool {
+	r.mu.RLock()
+	adapter, ok := r.adapters[gatewayID]
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	if u, ok := adapter.(ports.UnsignedWebhookGateway); ok {
+		return u.UnsignedWebhooks()
+	}
+	return false
+}
+
+// CheckStatus delegates to the gateway adapter's status check, resolving
+// per-tenant credentials from the request.
+func (r *Registry) CheckStatus(ctx context.Context, gatewayID string, req ports.GatewayStatusRequest) (*ports.GatewayPaymentResponse, error) {
+	r.mu.RLock()
+	adapter, ok := r.adapters[gatewayID]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("gateways: no adapter registered for %q", gatewayID)
+	}
+	return adapter.CheckStatus(ctx, req)
 }
 
 func (r *Registry) IDs() []string {

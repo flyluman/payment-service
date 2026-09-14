@@ -12,6 +12,7 @@ import (
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	"github.com/crownroutes/payment-service/internal/adapters/security"
 	"github.com/crownroutes/payment-service/internal/adapters/valkey"
+	"github.com/crownroutes/payment-service/internal/domain/gateway"
 	"github.com/crownroutes/payment-service/web"
 	"github.com/crownroutes/payment-service/internal/api"
 	"github.com/crownroutes/payment-service/internal/api/handlers"
@@ -156,7 +157,20 @@ func (a gatewaysBreakerAdapter) IsRoutable(ctx context.Context, gatewayID string
 	if err != nil {
 		return true, err
 	}
-	return cb.IsRoutable(), nil
+	if cb.IsRoutable() {
+		return true, nil
+	}
+	if !cb.ShouldTransitionToHalfOpen() {
+		return false, nil
+	}
+	// Lazy recovery: the cooldown has expired but nothing has re-opened the
+	// circuit, so atomically move OPEN → HALF_OPEN and let the next real call
+	// be the probe. The Lua transition is the single-writer: concurrent
+	// callers lose and report not routable.
+	if err := a.store.Transition(ctx, cb, gateway.StateHalfOpen); err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 type limiterAdapter struct{ rl *valkey.RateLimiter }

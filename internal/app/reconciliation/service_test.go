@@ -50,6 +50,14 @@ func (f *fakeStore) InsertEntries(_ context.Context, entries []reconciliation.En
 func (f *fakeStore) GetEntries(_ context.Context, _ uuid.UUID, _ ports.ReconciliationEntryFilter) ([]*reconciliation.Entry, error) {
 	return nil, nil
 }
+func (f *fakeStore) GetEntry(_ context.Context, entryID uuid.UUID) (*reconciliation.Entry, error) {
+	for i := range f.entries {
+		if f.entries[i].ID == entryID {
+			return &f.entries[i], nil
+		}
+	}
+	return nil, nil
+}
 func (f *fakeStore) UpdateEntry(_ context.Context, _ *reconciliation.Entry) error { return nil }
 func (f *fakeStore) GetPendingJobs(_ context.Context, _ int) ([]*reconciliation.Job, error) {
 	var pending []*reconciliation.Job
@@ -70,6 +78,16 @@ type fakeTxnReader struct {
 
 func (f *fakeTxnReader) GetByID(_ context.Context, id uuid.UUID) (*transaction.Txn, error) {
 	return f.txns[id], nil
+}
+
+func (f *fakeTxnReader) GetByIDs(_ context.Context, ids []uuid.UUID) ([]*transaction.Txn, error) {
+	var out []*transaction.Txn
+	for _, id := range ids {
+		if t, ok := f.txns[id]; ok {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
 
 type fakeTxnLister struct {
@@ -99,18 +117,18 @@ func (f *fakeFetcher) FetchSettlementReport(_ context.Context, _ uuid.UUID, _ st
 
 type fakeLogger struct{}
 
-func (f *fakeLogger) Info(string, map[string]any)  {}
-func (f *fakeLogger) Warn(string, map[string]any)  {}
+func (f *fakeLogger) Info(string, map[string]any)         {}
+func (f *fakeLogger) Warn(string, map[string]any)         {}
 func (f *fakeLogger) Error(string, map[string]any, error) {}
-func (f *fakeLogger) Debug(string, map[string]any) {}
-func (f *fakeLogger) Trace(string, map[string]any) {}
-func (f *fakeLogger) With(map[string]any) ports.Logger { return f }
+func (f *fakeLogger) Debug(string, map[string]any)        {}
+func (f *fakeLogger) Trace(string, map[string]any)        {}
+func (f *fakeLogger) With(map[string]any) ports.Logger    { return f }
 
 type fakeMetrics struct{}
 
-func (f *fakeMetrics) Increment(string, map[string]string) {}
+func (f *fakeMetrics) Increment(string, map[string]string)          {}
 func (f *fakeMetrics) Histogram(string, float64, map[string]string) {}
-func (f *fakeMetrics) Gauge(string, float64, map[string]string) {}
+func (f *fakeMetrics) Gauge(string, float64, map[string]string)     {}
 
 // --- tests ---
 
@@ -192,7 +210,8 @@ func TestCreateJob(t *testing.T) {
 	svc := NewService(store, nil, nil, nil, &fakeLogger{}, &fakeMetrics{})
 
 	now := time.Now().UTC()
-	job, err := svc.CreateJob(context.Background(), "stripe", &now, nil, nil, "ops")
+	tid := uuid.New()
+	job, err := svc.CreateJob(context.Background(), "stripe", &tid, &now, nil, nil, "ops")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +259,7 @@ func TestRunJob_SingleTxn_CompleteMatch(t *testing.T) {
 	}
 	store.jobs = append(store.jobs, job)
 
-	err := svc.RunJob(context.Background(), job.ID)
+	err := svc.RunJob(context.Background(), "ops", job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +298,7 @@ func TestRunJob_SingleTxn_MissingGateway(t *testing.T) {
 	}
 	store.jobs = append(store.jobs, job)
 
-	err := svc.RunJob(context.Background(), job.ID)
+	err := svc.RunJob(context.Background(), "ops", job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +322,7 @@ func TestRunJob_NonPending_Skipped(t *testing.T) {
 	}
 	store.jobs = append(store.jobs, job)
 
-	err := svc.RunJob(context.Background(), job.ID)
+	err := svc.RunJob(context.Background(), "ops", job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,13 +333,22 @@ func TestRunJob_NonPending_Skipped(t *testing.T) {
 }
 
 func TestResolveEntry(t *testing.T) {
-	store := &fakeStore{}
+	jobID := uuid.New()
+	store := &fakeStore{
+		jobs: []*reconciliation.Job{
+			{ID: jobID, Actor: "ops", Status: reconciliation.JobStatusCompleted},
+		},
+		entries: []reconciliation.Entry{
+			{ID: uuid.New(), JobID: jobID},
+		},
+	}
 	svc := NewService(store, nil, nil, nil, &fakeLogger{}, &fakeMetrics{})
 
-	entryID := uuid.New()
-	err := svc.ResolveEntry(context.Background(), entryID, "ops", "looks good")
+	err := svc.ResolveEntry(context.Background(), "ops", store.entries[0].ID, "ops", "looks good")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Store.UpdateEntry was called — we just verify no error
+	if store.entries[0].ResolutionStatus != reconciliation.ResolutionResolved {
+		t.Errorf("entry should be resolved, got %s", store.entries[0].ResolutionStatus)
+	}
 }

@@ -91,7 +91,6 @@ func TestTransition_Invalid(t *testing.T) {
 	}{
 		{StatusInitiated, StatusRefunded},
 		{StatusRefunded, StatusFailed},
-		{StatusFailed, StatusProcessing},
 		{StatusProcessing, StatusInitiated},
 	}
 	for _, c := range cases {
@@ -140,5 +139,15 @@ func TestIsRetryable(t *testing.T) {
 	}
 	if (&Refund{Status: StatusRefunded}).IsRetryable() {
 		t.Error("refunded refund should not be retryable")
+	}
+}
+
+func TestFailedRefundCanRetry(t *testing.T) {
+	r := &Refund{Status: StatusFailed}
+	if err := r.Transition(StatusProcessing); err != nil {
+		t.Fatalf("FAILED refund should be able to retry: %v", err)
+	}
+	if r.Status != StatusProcessing {
+		t.Errorf("status: got %s, want PROCESSING", r.Status)
 	}
 }

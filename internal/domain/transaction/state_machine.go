@@ -17,8 +17,8 @@ func (e ErrInvalidTransition) Error() string {
 
 var transitionTable = map[Status][]Status{
 	StatusPending:           {StatusProcessing, StatusAuthorized, StatusCaptured, StatusFailed, StatusCancelled},
-	StatusProcessing:        {StatusCaptured, StatusAuthorized, StatusFailed},
-	StatusAuthorized:        {StatusCaptured, StatusFailed, StatusCancelled},
+	StatusProcessing:        {StatusCaptured, StatusAuthorized, StatusFailed, StatusCancelled},
+	StatusAuthorized:        {StatusProcessing, StatusCaptured, StatusFailed, StatusCancelled},
 	StatusCaptured:          {StatusSettled, StatusRefundPending, StatusRefunded, StatusRefundFailed, StatusDisputed},
 	StatusSettled:           {StatusRefundPending, StatusRefunded, StatusRefundFailed, StatusDisputed},
 	StatusFailed:            {StatusCancelled},
@@ -45,7 +45,7 @@ func isValidTransition(from, to Status) bool {
 
 func applyTransitionEffects(tx *Txn, from, to Status, now time.Time) {
 	switch {
-	case to == StatusFailed || to == StatusCancelled || to == StatusCaptured || to == StatusSettled:
+	case to == StatusFailed || to == StatusCancelled || to == StatusCaptured || to == StatusSettled || to == StatusAuthorized:
 		if from == StatusProcessing {
 			tx.ProcessingStartedAt = nil
 			tx.ProcessingTimeout = nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -99,7 +100,8 @@ func (r *RefundRepository) UpdateStatus(ctx context.Context, rf *refund.Refund) 
     actual_gateway    = $3,
     attempts          = $4,
     failure_reason    = $5,
-    resolved_at       = $6
+    resolved_at       = $6,
+    updated_at        = NOW()
 WHERE id = $7
   AND version = $8
 RETURNING version`,
@@ -152,6 +154,65 @@ FOR UPDATE`, transactionID).Scan(&id)
 		return fmt.Errorf("refund: lock parent transaction %s: %w", transactionID, err)
 	}
 	return nil
+}
+
+// ClaimProcessing atomically moves a refund into REFUND_PROCESSING and bumps
+// its attempt count. It is safe to run outside a transaction: the guarded
+// single-row UPDATE is the concurrency gate between the relay and the reaper,
+// so only one caller ever drives the gateway for a given refund.
+func (r *RefundRepository) ClaimProcessing(ctx context.Context, rf *refund.Refund) (bool, error) {
+	var newVersion int
+	err := queryer(ctx, r.db.pool).QueryRow(ctx, `UPDATE refunds SET
+    status     = 'REFUND_PROCESSING',
+    version    = version + 1,
+    attempts   = attempts + 1,
+    updated_at = NOW()
+WHERE id = $1
+  AND status IN ('REFUND_INITIATED', 'REFUND_PROCESSING')
+  AND version = $2
+RETURNING version`, rf.ID, rf.Version).Scan(&newVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("refund: claim processing %s: %w", rf.ID, err)
+	}
+	rf.Status = refund.StatusProcessing
+	rf.Attempts++
+	rf.Version = newVersion
+	return true, nil
+}
+
+// ListStaleRefunds returns refund IDs stuck in a non-terminal state whose last
+// update predates olderThan. Used by the refund reaper to re-drive refunds the
+// relay left in-flight (ambiguous or timed-out gateway responses).
+func (r *RefundRepository) ListStaleRefunds(ctx context.Context, olderThan time.Duration, maxAttempts, limit int) ([]uuid.UUID, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.db.pool.Query(ctx, `SELECT id FROM refunds
+WHERE status IN ('REFUND_INITIATED', 'REFUND_PROCESSING')
+  AND attempts < $1
+  AND updated_at < NOW() - $2::interval
+ORDER BY updated_at ASC
+LIMIT $3`, maxAttempts, olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("refund: list stale refunds: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("refund: scan stale refund: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("refund: iterate stale refunds: %w", err)
+	}
+	return ids, nil
 }
 
 func scanRefund(row pgx.Row) (*refund.Refund, error) {

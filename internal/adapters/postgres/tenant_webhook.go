@@ -10,6 +10,10 @@ import (
 	"github.com/crownroutes/payment-service/internal/ports"
 )
 
+// tenantWebhookClaimTTL is how long a claimed-but-undelivered webhook stays
+// reserved before another worker may retry it (covers crashed workers).
+const tenantWebhookClaimTTL = 5 * time.Minute
+
 type TenantWebhookDeliveryReader struct {
 	db *DB
 }
@@ -19,13 +23,24 @@ func NewTenantWebhookDeliveryReader(db *DB) *TenantWebhookDeliveryReader {
 }
 
 func (r *TenantWebhookDeliveryReader) ListPending(ctx context.Context, limit int) ([]ports.TenantWebhookDelivery, error) {
+	claimTTLSec := int64(tenantWebhookClaimTTL.Seconds())
 	rows, err := r.db.Pool().Query(ctx, `
-		SELECT id, tenant_id, transaction_id, event_type, payload, endpoint_url, attempts
-		FROM tenant_webhook_deliveries
-		WHERE status = 'PENDING' AND next_attempt_at <= NOW()
-		ORDER BY next_attempt_at ASC
-		LIMIT $1
-	`, limit)
+		UPDATE tenant_webhook_deliveries d
+		SET locked_at = NOW()
+		FROM (
+			SELECT id
+			FROM tenant_webhook_deliveries
+			WHERE status = 'PENDING'
+			  AND next_attempt_at <= NOW()
+			  AND (locked_at IS NULL OR locked_at < NOW() - make_interval(secs => $2))
+			ORDER BY next_attempt_at ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		) AS claimed
+		WHERE d.id = claimed.id
+		RETURNING d.id, d.tenant_id, d.transaction_id, d.event_type,
+		          d.payload, d.endpoint_url, d.attempts
+	`, limit, claimTTLSec)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +76,7 @@ func NewTenantWebhookDeliveryUpdaterWithMaxAttempts(db *DB, maxAttempts int) *Te
 func (u *TenantWebhookDeliveryUpdater) MarkDelivered(ctx context.Context, id uuid.UUID) error {
 	_, err := u.db.Pool().Exec(ctx, `
 		UPDATE tenant_webhook_deliveries
-		SET status = 'DELIVERED', delivered_at = NOW()
+		SET status = 'DELIVERED', delivered_at = NOW(), locked_at = NULL
 		WHERE id = $1
 	`, id)
 	return err
@@ -74,7 +89,8 @@ func (u *TenantWebhookDeliveryUpdater) MarkFailed(ctx context.Context, id uuid.U
 		    attempts = $2,
 		    last_error = $3,
 		    last_attempt_at = NOW(),
-		    next_attempt_at = $4
+		    next_attempt_at = $4,
+		    locked_at = NULL
 		WHERE id = $1
 	`, id, attempts, lastError, nextAttemptAt, u.maxAttempts)
 	return err
@@ -125,6 +141,29 @@ func (s *TenantWebhookConfigStore) List(ctx context.Context) ([]*ports.TenantWeb
 		FROM tenant_webhook_configs
 		ORDER BY tenant_id
 	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var configs []*ports.TenantWebhookConfig
+	for rows.Next() {
+		var cfg ports.TenantWebhookConfig
+		if err := rows.Scan(&cfg.TenantID, &cfg.EndpointURL, &cfg.SigningSecret, &cfg.IsActive); err != nil {
+			return nil, err
+		}
+		configs = append(configs, &cfg)
+	}
+	return configs, rows.Err()
+}
+
+func (s *TenantWebhookConfigStore) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]*ports.TenantWebhookConfig, error) {
+	rows, err := s.db.Pool().Query(ctx, `
+		SELECT tenant_id, endpoint_url, signing_secret, active
+		FROM tenant_webhook_configs
+		WHERE tenant_id = $1
+		ORDER BY tenant_id
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}

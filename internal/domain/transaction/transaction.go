@@ -99,18 +99,18 @@ type Txn struct {
 }
 
 const (
-	StatusPending            Status = "PENDING"
-	StatusProcessing         Status = "PROCESSING"
-	StatusAuthorized         Status = "AUTHORIZED"
-	StatusCaptured           Status = "CAPTURED"
-	StatusSettled            Status = "SETTLED"
-	StatusFailed             Status = "FAILED"
-	StatusCancelled          Status = "CANCELLED"
-	StatusRefundPending      Status = "REFUND_PENDING"
-	StatusPartiallyRefunded  Status = "PARTIALLY_REFUNDED"
-	StatusRefunded           Status = "REFUNDED"
-	StatusRefundFailed       Status = "REFUND_FAILED"
-	StatusDisputed           Status = "DISPUTED"
+	StatusPending           Status = "PENDING"
+	StatusProcessing        Status = "PROCESSING"
+	StatusAuthorized        Status = "AUTHORIZED"
+	StatusCaptured          Status = "CAPTURED"
+	StatusSettled           Status = "SETTLED"
+	StatusFailed            Status = "FAILED"
+	StatusCancelled         Status = "CANCELLED"
+	StatusRefundPending     Status = "REFUND_PENDING"
+	StatusPartiallyRefunded Status = "PARTIALLY_REFUNDED"
+	StatusRefunded          Status = "REFUNDED"
+	StatusRefundFailed      Status = "REFUND_FAILED"
+	StatusDisputed          Status = "DISPUTED"
 )
 
 const (
@@ -121,10 +121,10 @@ const (
 )
 
 const (
-	ActorSystem   Actor = "system"
-	ActorTenant Actor = "tenant"
-	ActorOps      Actor = "ops"
-	ActorGateway  Actor = "gateway"
+	ActorSystem  Actor = "system"
+	ActorTenant  Actor = "tenant"
+	ActorOps     Actor = "ops"
+	ActorGateway Actor = "gateway"
 )
 
 const (
@@ -140,8 +140,8 @@ const (
 )
 
 const (
-	CaptureModeAuto    CaptureMode = "auto"
-	CaptureModeManual  CaptureMode = "manual"
+	CaptureModeAuto   CaptureMode = "auto"
+	CaptureModeManual CaptureMode = "manual"
 )
 
 var validCaptureModes = map[CaptureMode]struct{}{
@@ -156,9 +156,15 @@ var validPaymentMethods = map[PaymentMethod]struct{}{
 	PaymentMethodWallet:     {},
 }
 
+// IsTerminal reports whether the transaction has reached a state from which it
+// can no longer be cancelled. Only PENDING, PROCESSING and AUTHORIZED are
+// still cancellable; everything else (including FAILED and refund states) is
+// terminal for cancellation purposes.
 func (s Status) IsTerminal() bool {
 	switch s {
-	case StatusCaptured, StatusCancelled, StatusRefunded, StatusRefundFailed:
+	case StatusCaptured, StatusSettled, StatusFailed, StatusCancelled,
+		StatusRefundPending, StatusPartiallyRefunded, StatusRefunded,
+		StatusRefundFailed, StatusDisputed:
 		return true
 	}
 	return false
@@ -215,6 +221,7 @@ func New(
 		CaptureMode:             captureMode,
 		Version:                 1,
 		GatewayID:               gatewayID,
+		GatewayIdempotencyKey:   uuid.NewString(),
 		EstimatedTimeoutSeconds: estimatedTimeoutSec,
 		CustomerID:              customerID,
 		CustomerEmail:           customerEmail,

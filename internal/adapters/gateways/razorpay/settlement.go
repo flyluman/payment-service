@@ -42,20 +42,33 @@ func (a *Adapter) FetchSettlementReport(ctx context.Context, tenantID uuid.UUID,
 	q.Set("to", strconv.FormatInt(end.Unix(), 10))
 	q.Set("count", "100")
 
-	var list rzpPaymentListResponse
-	path := "/v1/payments?" + q.Encode()
-	if err := a.do(ctx, tc, http.MethodGet, path, nil, &list); err != nil {
-		return nil, err
+	var all []rzpPayment
+	var skip int
+
+	for page := 0; page < 100; page++ {
+		q.Set("skip", strconv.Itoa(skip))
+
+		var list rzpPaymentListResponse
+		path := "/v1/payments?" + q.Encode()
+		if err := a.do(ctx, tc, http.MethodGet, path, nil, &list); err != nil {
+			return nil, err
+		}
+
+		all = append(all, list.Items...)
+		if len(list.Items) < 100 {
+			break
+		}
+		skip += len(list.Items)
 	}
 
 	report := &ports.SettlementReport{
 		GatewayID:   gatewayID,
 		PeriodStart: start,
 		PeriodEnd:   end,
-		Entries:     make([]ports.SettlementEntry, 0, len(list.Items)),
+		Entries:     make([]ports.SettlementEntry, 0, len(all)),
 	}
 
-	for _, p := range list.Items {
+	for _, p := range all {
 		status := "pending"
 		if p.Status == "captured" {
 			status = "succeeded"

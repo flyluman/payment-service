@@ -17,9 +17,9 @@ import (
 
 func rateLimiter(c *valkey.Client) *valkey.RateLimiter {
 	return valkey.NewRateLimiter(c, config.RateLimitConfig{
-		FallbackMultiplier:  0.5,
-		LocalMaxBuckets:     1000,
-		HealthCheckInterval: time.Second,
+		FallbackMultiplier:    0.5,
+		LocalMaxBuckets:       1000,
+		HealthCheckIntervalMS: 1000,
 	}, nil, nil)
 }
 

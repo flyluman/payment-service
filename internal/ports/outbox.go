@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
 )
 
 type OutboxWriter interface {
@@ -13,7 +15,7 @@ type OutboxWriter interface {
 	MarkFailed(ctx context.Context, id uuid.UUID, createdAt time.Time, lastErr string, nextAttempt time.Time) error
 	MarkExhausted(ctx context.Context, id uuid.UUID, createdAt time.Time, lastErr string) error
 	PollPending(ctx context.Context, shards []int, batchSize int) ([]PendingEvent, error)
-	ReplayDeadLetter(ctx context.Context, deadLetterID uuid.UUID, actor, reason string) (uuid.UUID, error)
+	ReplayDeadLetter(ctx context.Context, tenantID, deadLetterID uuid.UUID, actor, reason string) (uuid.UUID, error)
 }
 
 type PendingEvent struct {
@@ -40,16 +42,16 @@ type OutboxEvent struct {
 }
 
 const (
-	EventTypeTransactionCreated   = "TRANSACTION_CREATED"
-	EventTypeTransactionCaptured  = "TRANSACTION_CAPTURED"
-	EventTypeTransactionFailed    = "TRANSACTION_FAILED"
-	EventTypeTransactionCancelled = "TRANSACTION_CANCELLED"
+	EventTypeTransactionCreated    = "TRANSACTION_CREATED"
+	EventTypeTransactionCaptured   = "TRANSACTION_CAPTURED"
+	EventTypeTransactionFailed     = "TRANSACTION_FAILED"
+	EventTypeTransactionCancelled  = "TRANSACTION_CANCELLED"
+	EventTypeTransactionAuthorized = "TRANSACTION_AUTHORIZED"
+	EventTypeTransactionSettled    = "TRANSACTION_SETTLED"
 
 	EventTypeRefundInitiated = "REFUND_INITIATED"
 	EventTypeRefundSucceeded = "REFUND_SUCCEEDED"
 	EventTypeRefundFailed    = "REFUND_FAILED"
-
-	EventTypeAuditStateChange = "AUDIT_STATE_CHANGE"
 
 	EventTypeTransactionCallback = "TRANSACTION_CALLBACK"
 
@@ -77,10 +79,7 @@ type DeadLetter struct {
 	EventVersion     int
 	AggregateVersion int
 	FailureReason    string
-	ErrorMessage     string
-	Attempts         int
 	FailedAt         time.Time
-	CreatedAt        time.Time
 	ResolvedAt       *time.Time
 	ResolvedBy       string
 }
@@ -104,9 +103,33 @@ type TenantWebhookDispatcher interface {
 }
 
 type DeadLetterFilter struct {
+	TenantID  uuid.UUID
 	Resolved  *bool
 	EventType *string
 	DateFrom  *time.Time
 	DateTo    *time.Time
 	Limit     int
+}
+
+// EventTypeForTransactionStatus maps a transaction status to the outbox event
+// type published downstream. ok is false for statuses that have no distinct
+// downstream event; callers must skip publishing rather than emit a bogus
+// failure event.
+func EventTypeForTransactionStatus(status transaction.Status) (string, bool) {
+	switch status {
+	case transaction.StatusCaptured:
+		return EventTypeTransactionCaptured, true
+	case transaction.StatusCancelled:
+		return EventTypeTransactionCancelled, true
+	case transaction.StatusAuthorized:
+		return EventTypeTransactionAuthorized, true
+	case transaction.StatusFailed:
+		return EventTypeTransactionFailed, true
+	case transaction.StatusSettled:
+		return EventTypeTransactionSettled, true
+	case transaction.StatusRefunded:
+		return EventTypeRefundSucceeded, true
+	default:
+		return "", false
+	}
 }
