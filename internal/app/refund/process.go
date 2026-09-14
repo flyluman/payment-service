@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/crownroutes/payment-service/internal/domain/notification"
 	"github.com/crownroutes/payment-service/internal/domain/refund"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	"github.com/crownroutes/payment-service/internal/ports"
@@ -82,11 +83,39 @@ func (s *Service) ProcessRefund(ctx context.Context, refundID uuid.UUID) (*refun
 		if err := s.refunds.UpdateStatus(ctx, rf); err != nil {
 			return err
 		}
+
+		if err := s.transitionParentOnRefundResult(ctx, parent, outcome); err != nil {
+			return err
+		}
+		if err := s.txns.UpdateStatus(ctx, parent); err != nil {
+			return err
+		}
+
 		event, err := s.buildTerminalEvent(rf, outcome.newStatus)
 		if err != nil {
 			return err
 		}
-		return s.outbox.Write(ctx, event)
+		if err := s.outbox.Write(ctx, event); err != nil {
+			return err
+		}
+
+		s.dispatchTerminalNotification(ctx, parent, rf, outcome)
+		s.dispatchTenantWebhook(ctx, parent, rf, outcome)
+
+		if s.bus != nil {
+			var txnStatus transaction.Status
+			switch outcome.newStatus {
+			case refund.StatusRefunded:
+				txnStatus = transaction.StatusRefunded
+			case refund.StatusFailed:
+				txnStatus = transaction.StatusRefundFailed
+			}
+			s.bus.Publish(ctx, ports.StatusEvent{
+				TransactionID: parent.ID,
+				Status:        txnStatus,
+			})
+		}
+		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("refund: finalize %s: %w", refundID, err)
 	}
@@ -110,6 +139,21 @@ func (s *Service) ProcessRefund(ctx context.Context, refundID uuid.UUID) (*refun
 		})
 	}
 	return rf, nil
+}
+
+func (s *Service) transitionParentOnRefundResult(ctx context.Context, parent *transaction.Txn, outcome refundOutcome) error {
+	if outcome.newStatus == refund.StatusRefunded {
+		alreadyRefunded, err := s.refunds.SumActiveRefunds(ctx, parent.ID)
+		if err != nil {
+			return fmt.Errorf("refund: sum active refunds for parent %s: %w", parent.ID, err)
+		}
+		if alreadyRefunded >= parent.Amount {
+			return transaction.TransitionState(parent, transaction.StatusRefunded, transaction.ActorSystem)
+		}
+		return transaction.TransitionState(parent, transaction.StatusPartiallyRefunded, transaction.ActorSystem)
+	}
+
+	return transaction.TransitionState(parent, transaction.StatusRefundFailed, transaction.ActorSystem)
 }
 
 func (s *Service) ResolveCancelRefund(ctx context.Context, transactionID uuid.UUID, amount int64) error {
@@ -231,4 +275,72 @@ func (s *Service) buildTerminalEvent(rf *refund.Refund, status refund.Status) (p
 		EventVersion:     1,
 		AggregateVersion: rf.Version,
 	}, nil
+}
+
+func (s *Service) dispatchTerminalNotification(ctx context.Context, parent *transaction.Txn, rf *refund.Refund, outcome refundOutcome) {
+	if s.notif == nil || parent.CustomerEmail == "" {
+		return
+	}
+
+	data := map[string]any{
+		"amount":         rf.Amount,
+		"currency":       parent.Currency,
+		"transaction_id": parent.ID.String(),
+	}
+
+	switch outcome.newStatus {
+	case refund.StatusRefunded:
+		s.notif.Dispatch(ctx, &notification.Notification{
+			TenantID:     parent.TenantID,
+			UserID:       &parent.UserID,
+			Type:         notification.RefundCompleted,
+			Channel:      notification.ChannelEmail,
+			Recipient:    parent.CustomerEmail,
+			TemplateName: "REFUND_COMPLETED",
+			TemplateData: data,
+		})
+	case refund.StatusFailed:
+		reason := ""
+		if outcome.failureReason != nil {
+			reason = outcome.failureReason.GatewayMessage
+		}
+		data["reason"] = reason
+		s.notif.Dispatch(ctx, &notification.Notification{
+			TenantID:     parent.TenantID,
+			UserID:       &parent.UserID,
+			Type:         notification.RefundFailed,
+			Channel:      notification.ChannelEmail,
+			Recipient:    parent.CustomerEmail,
+			TemplateName: "REFUND_FAILED",
+			TemplateData: data,
+		})
+	}
+}
+
+func (s *Service) dispatchTenantWebhook(ctx context.Context, parent *transaction.Txn, rf *refund.Refund, outcome refundOutcome) {
+	if s.twDispatcher == nil {
+		return
+	}
+
+	var eventType string
+	switch outcome.newStatus {
+	case refund.StatusRefunded:
+		eventType = ports.EventTypeRefundSucceeded
+	case refund.StatusFailed:
+		eventType = ports.EventTypeRefundFailed
+	default:
+		return
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"refund_id":      rf.ID.String(),
+		"transaction_id": parent.ID.String(),
+		"status":         string(outcome.newStatus),
+		"amount":         rf.Amount,
+	})
+	if err != nil {
+		return
+	}
+
+	_ = s.twDispatcher.Dispatch(ctx, parent.TenantID, parent.ID, eventType, payload)
 }

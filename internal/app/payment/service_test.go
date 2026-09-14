@@ -100,6 +100,9 @@ func (a *fakeAdapter) Refund(ctx context.Context, req ports.GatewayRefundRequest
 func (a *fakeAdapter) Cancel(ctx context.Context, req ports.GatewayCancelRequest) (*ports.GatewayCancelResponse, error) {
 	return nil, nil
 }
+func (a *fakeAdapter) CapturePayment(ctx context.Context, req ports.GatewayCaptureRequest) (*ports.GatewayCaptureResponse, error) {
+	return nil, nil
+}
 func (a *fakeAdapter) Capabilities() ports.GatewayCapabilities { return ports.GatewayCapabilities{} }
 
 type fakeRegistry struct {

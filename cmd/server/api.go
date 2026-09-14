@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/crownroutes/payment-service/config"
+	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	"github.com/crownroutes/payment-service/internal/adapters/security"
 	"github.com/crownroutes/payment-service/internal/adapters/valkey"
 	"github.com/crownroutes/payment-service/web"
@@ -34,6 +35,7 @@ func startAPI(ctx context.Context, d *deps) error {
 	}
 
 	tenantGatewayHandler := handlers.NewTenantGatewayHandler(d.tenantConfigStore)
+	twhConfigHandler := handlers.NewTenantWebhookConfigHandler(postgres.NewTenantWebhookConfigStore(d.db))
 
 	uiFS, _ := fs.Sub(web.StaticFiles, "static")
 	uiHandler := http.FileServer(http.FS(uiFS))
@@ -48,18 +50,19 @@ func startAPI(ctx context.Context, d *deps) error {
 	sseHandler := handlers.NewSSEHandler(d.eventBus, d.txnRepo, logger)
 
 	handler := api.NewRouter(api.Deps{
-		Payment:       handlers.NewPaymentHandler(d.paymentSvc),
-		Pay:           payHandler,
-		Gateway:       handlers.NewGatewayHandler(d.gatewaySvc, d.configStore),
-		TenantGateway: tenantGatewayHandler,
-		Refund:        handlers.NewRefundHandler(d.refundSvc, d.txnRepo),
-		Cancel:        handlers.NewCancelHandler(d.cancelSvc),
-		Webhook:       handlers.NewWebhookHandler(d.webhookSvc, d.registry, d.txnRepo, d.tenantConfigStore, logger),
-		Dispute:       handlers.NewDisputeHandler(d.disputeSvc),
-		DeadLetter:     handlers.NewDeadLetterHandler(d.outboxWriter),
-		Reconciliation: handlers.NewReconciliationHandler(d.reconSvc),
-		SSE:           sseHandler,
-		UI:            uiHandler,
+		Payment:           handlers.NewPaymentHandler(d.paymentSvc),
+		Pay:               payHandler,
+		Gateway:           handlers.NewGatewayHandler(d.gatewaySvc, d.configStore),
+		TenantGateway:     tenantGatewayHandler,
+		Refund:            handlers.NewRefundHandler(d.refundSvc, d.txnRepo),
+		Cancel:            handlers.NewCancelHandler(d.cancelSvc),
+		Webhook:           handlers.NewWebhookHandler(d.webhookSvc, d.registry, d.txnRepo, d.tenantConfigStore, d.disputeSvc, logger),
+		Dispute:           handlers.NewDisputeHandler(d.disputeSvc),
+		DeadLetter:        handlers.NewDeadLetterHandler(d.outboxWriter),
+		Reconciliation:    handlers.NewReconciliationHandler(d.reconSvc),
+		SSE:               sseHandler,
+		TenantWebhookConf: twhConfigHandler,
+		UI:                uiHandler,
 		Health: handlers.NewHealthHandler(
 			handlers.Check{Name: "database", Pinger: d.db},
 			handlers.Check{Name: "valkey", Pinger: d.valkeyClient},
@@ -67,6 +70,7 @@ func startAPI(ctx context.Context, d *deps) error {
 		Logger:  logger,
 		Auth:    authProvider,
 		Limiter: limiterAdapter{rl: d.rateLimiter},
+		ResponseCache: d.responseCache,
 		RateLimit: middleware.RateLimitConfig{
 			Capacity:     cfg.RateLimit.Capacity,
 			RefillPerSec: cfg.RateLimit.RefillPerSec,

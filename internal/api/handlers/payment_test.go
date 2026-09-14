@@ -47,9 +47,18 @@ func (f *fakeService) GetGatewayMetadata(ctx context.Context, id uuid.UUID) (map
 func (f *fakeService) ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
 	return &ports.TransactionListResult{}, nil
 }
+func (f *fakeService) Authorize(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	return nil, nil
+}
+func (f *fakeService) Capture(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	return nil, nil
+}
+func (f *fakeService) Settle(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	return nil, nil
+}
 
 func sampleTxn(status transaction.Status) *transaction.Txn {
-	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order", nil, 30)
+	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order", nil, 30, transaction.CaptureModeAuto)
 	t.Status = status
 	return t
 }
@@ -176,7 +185,7 @@ func TestCreate_IdempotencyConflict(t *testing.T) {
 }
 
 func TestGet_Success(t *testing.T) {
-	txn := sampleTxn(transaction.StatusSucceeded)
+	txn := sampleTxn(transaction.StatusCaptured)
 	h := NewPaymentHandler(&fakeService{fetched: txn})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/payments/"+txn.ID.String(), nil)
 	req.SetPathValue("id", txn.ID.String())

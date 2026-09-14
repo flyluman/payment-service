@@ -91,8 +91,8 @@ func TestRefundInitiate_Success(t *testing.T) {
 	h := NewRefundHandler(&fakeRefundService{initiated: sampleRefund(domainrefund.StatusInitiated), processed: processed}, &fakeRefundTxnGetter{})
 
 	rec := postRefund(h, uuid.NewString(), `{"amount":40000,"reason":"customer_request"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d (%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 

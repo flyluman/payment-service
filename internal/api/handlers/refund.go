@@ -110,12 +110,7 @@ func (h *RefundHandler) Initiate(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Verdict {
 	case idempotency.Created:
-		processed, err := h.svc.ProcessRefund(r.Context(), result.Refund.ID)
-		if err != nil {
-			writeJSON(w, r, http.StatusAccepted, toInitiateRefundResponse(result.Refund))
-			return
-		}
-		writeJSON(w, r, http.StatusCreated, toInitiateRefundResponse(processed))
+		writeJSON(w, r, http.StatusAccepted, toInitiateRefundResponse(result.Refund))
 	case idempotency.Replayed:
 		writeJSON(w, r, http.StatusOK, toInitiateRefundResponse(result.Refund))
 	case idempotency.InProgress:

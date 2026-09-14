@@ -24,6 +24,9 @@ func (stubAdapter) Refund(context.Context, ports.GatewayRefundRequest) (*ports.G
 func (stubAdapter) Cancel(context.Context, ports.GatewayCancelRequest) (*ports.GatewayCancelResponse, error) {
 	return nil, nil
 }
+func (stubAdapter) CapturePayment(context.Context, ports.GatewayCaptureRequest) (*ports.GatewayCaptureResponse, error) {
+	return nil, nil
+}
 
 func TestRegistry_RegisterAndGet(t *testing.T) {
 	r := NewRegistry()

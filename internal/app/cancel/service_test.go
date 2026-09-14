@@ -40,14 +40,14 @@ func (noopMetrics) Histogram(string, float64, map[string]string) {}
 func (noopMetrics) Gauge(string, float64, map[string]string)     {}
 
 func txnWith(status transaction.Status, intent bool) *transaction.Txn {
-	t, _ := transaction.New(uuid.New(), uuid.New(), 1000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "", "", nil, 30)
+	t, _ := transaction.New(uuid.New(), uuid.New(), 1000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "", "", nil, 30, transaction.CaptureModeAuto)
 	t.Status = status
 	t.CancelIntent = intent
 	return t
 }
 
 func TestCancel_AlreadyTerminal(t *testing.T) {
-	store := &fakeStore{txn: txnWith(transaction.StatusSucceeded, false)}
+	store := &fakeStore{txn: txnWith(transaction.StatusCaptured, false)}
 	s := NewService(store, noopLogger{}, noopMetrics{})
 
 	res, err := s.Cancel(context.Background(), CancelInput{TransactionID: store.txn.ID})

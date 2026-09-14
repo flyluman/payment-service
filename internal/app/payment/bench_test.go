@@ -86,7 +86,7 @@ func BenchmarkProcessPayment(b *testing.B) {
 			txn.ID = uuid.Must(uuid.NewV7())
 			// already succeeded by another instance
 			succeeded := txn
-			succeeded.Status = transaction.StatusSucceeded
+			succeeded.Status = transaction.StatusCaptured
 			succeeded.GatewayReferenceID = "pi_other"
 
 			repo := &fakeRepo{store: map[uuid.UUID]*transaction.Txn{

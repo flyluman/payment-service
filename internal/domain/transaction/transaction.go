@@ -15,6 +15,7 @@ type PaymentMethod string
 type Actor string
 type CancelVia string
 type FailureReasonSource string
+type CaptureMode string
 
 type FailureReason struct {
 	Category       string              `json:"category"`
@@ -63,6 +64,7 @@ type Txn struct {
 	Currency                string
 	PaymentMethod           PaymentMethod
 	Status                  Status
+	CaptureMode             CaptureMode
 	Version                 int // optimistic locking — repo rejects writes where stored version != expected
 	GatewayID               string
 	GatewayReferenceID      string
@@ -97,13 +99,18 @@ type Txn struct {
 }
 
 const (
-	StatusPending      Status = "PENDING"
-	StatusProcessing   Status = "PROCESSING"
-	StatusSucceeded    Status = "SUCCEEDED"
-	StatusFailed       Status = "FAILED"
-	StatusCancelled    Status = "CANCELLED"
-	StatusRefunded     Status = "REFUNDED"
-	StatusRefundFailed Status = "REFUND_FAILED"
+	StatusPending            Status = "PENDING"
+	StatusProcessing         Status = "PROCESSING"
+	StatusAuthorized         Status = "AUTHORIZED"
+	StatusCaptured           Status = "CAPTURED"
+	StatusSettled            Status = "SETTLED"
+	StatusFailed             Status = "FAILED"
+	StatusCancelled          Status = "CANCELLED"
+	StatusRefundPending      Status = "REFUND_PENDING"
+	StatusPartiallyRefunded  Status = "PARTIALLY_REFUNDED"
+	StatusRefunded           Status = "REFUNDED"
+	StatusRefundFailed       Status = "REFUND_FAILED"
+	StatusDisputed           Status = "DISPUTED"
 )
 
 const (
@@ -132,6 +139,16 @@ const (
 	FailureReasonSourceTimeout  FailureReasonSource = "timeout"
 )
 
+const (
+	CaptureModeAuto    CaptureMode = "auto"
+	CaptureModeManual  CaptureMode = "manual"
+)
+
+var validCaptureModes = map[CaptureMode]struct{}{
+	CaptureModeAuto:   {},
+	CaptureModeManual: {},
+}
+
 var validPaymentMethods = map[PaymentMethod]struct{}{
 	PaymentMethodCard:       {},
 	PaymentMethodUPI:        {},
@@ -141,7 +158,7 @@ var validPaymentMethods = map[PaymentMethod]struct{}{
 
 func (s Status) IsTerminal() bool {
 	switch s {
-	case StatusSucceeded, StatusCancelled, StatusRefunded, StatusRefundFailed:
+	case StatusCaptured, StatusCancelled, StatusRefunded, StatusRefundFailed:
 		return true
 	}
 	return false
@@ -159,6 +176,7 @@ func New(
 	description string,
 	metadata map[string]any,
 	estimatedTimeoutSec int,
+	captureMode CaptureMode,
 ) (*Txn, error) {
 	if amount <= 0 {
 		return nil, fmt.Errorf("amount must be positive, got %d", amount)
@@ -178,6 +196,12 @@ func New(
 	if estimatedTimeoutSec <= 0 {
 		return nil, fmt.Errorf("estimatedTimeoutSec must be positive, got %d", estimatedTimeoutSec)
 	}
+	if captureMode == "" {
+		captureMode = CaptureModeAuto
+	}
+	if _, ok := validCaptureModes[captureMode]; !ok {
+		return nil, fmt.Errorf("invalid capture mode %q", captureMode)
+	}
 
 	now := time.Now().UTC()
 	return &Txn{
@@ -188,6 +212,7 @@ func New(
 		Currency:                currency,
 		PaymentMethod:           method,
 		Status:                  StatusPending,
+		CaptureMode:             captureMode,
 		Version:                 1,
 		GatewayID:               gatewayID,
 		EstimatedTimeoutSeconds: estimatedTimeoutSec,

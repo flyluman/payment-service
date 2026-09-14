@@ -61,19 +61,7 @@ func (s *Service) Dispatch(ctx context.Context, n *notification.Notification) er
 	n.Recipient = recipient
 	n.ID = uuid.New()
 
-	tmpl, err := s.templates.GetNotificationTemplate(ctx, n.TemplateName)
-	if err != nil {
-		return err
-	}
-	if tmpl == nil {
-		return fmt.Errorf("template not found: %s", n.TemplateName)
-	}
-
-	if err := s.store.Insert(ctx, n); err != nil {
-		return err
-	}
-
-	return s.sendNotification(ctx, n, tmpl)
+	return s.store.Insert(ctx, n)
 }
 
 func (s *Service) ProcessQueue(ctx context.Context) error {

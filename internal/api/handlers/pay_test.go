@@ -43,7 +43,7 @@ func allTemplates() *template.Template {
 
 func sampleTxnWithToken() (*transaction.Txn, string) {
 	raw, hash, _ := payment.GenerateToken()
-	txn, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order", nil, 30)
+	txn, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order", nil, 30, transaction.CaptureModeAuto)
 	txn.TokenHash = hash
 	return txn, raw
 }

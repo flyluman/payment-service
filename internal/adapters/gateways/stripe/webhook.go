@@ -32,6 +32,24 @@ type stripeWebhookEvent struct {
 	} `json:"data"`
 }
 
+type stripeDisputeEvent struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	Data struct {
+		Object struct {
+			ID            string `json:"id"`
+			PaymentIntent string `json:"payment_intent"`
+			Status        string `json:"status"`
+			Reason        string `json:"reason"`
+			Amount        int64  `json:"amount"`
+			Currency      string `json:"currency"`
+			EvidenceDetails struct {
+				DueBy *int64 `json:"due_by"`
+			} `json:"evidence_details"`
+		} `json:"object"`
+	} `json:"data"`
+}
+
 func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret string) (*ports.GatewayWebhookEvent, error) {
 	ts, v1, ok := parseStripeSignature(headers["Stripe-Signature"])
 	if !ok {
@@ -52,6 +70,42 @@ func (a *Adapter) ParseWebhook(body []byte, headers map[string]string, secret st
 
 	if diff := time.Now().Unix() - ts; diff > webhookToleranceSeconds || diff < -webhookToleranceSeconds {
 		return nil, ports.ErrWebhookSignature
+	}
+
+	var raw struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, ports.ErrWebhookParse
+	}
+
+	if strings.HasPrefix(raw.Type, "charge.dispute.") {
+		var dev stripeDisputeEvent
+		if err := json.Unmarshal(body, &dev); err != nil {
+			return nil, ports.ErrWebhookParse
+		}
+
+		disputeEv := &ports.GatewayDisputeEvent{
+			GatewayDisputeID:  dev.Data.Object.ID,
+			GatewayReferenceID: dev.Data.Object.PaymentIntent,
+			Status:            mapDisputeStatus(dev.Data.Object.Status),
+			Reason:            dev.Data.Object.Reason,
+			Amount:            dev.Data.Object.Amount,
+			Currency:          strings.ToUpper(dev.Data.Object.Currency),
+		}
+		if dev.Data.Object.EvidenceDetails.DueBy != nil {
+			t := time.Unix(*dev.Data.Object.EvidenceDetails.DueBy, 0).UTC()
+			disputeEv.EvidenceDueBy = &t
+		}
+
+		return &ports.GatewayWebhookEvent{
+			EventID:            dev.ID,
+			GatewayReferenceID: dev.Data.Object.PaymentIntent,
+			EventType:          dev.Type,
+			GatewayMetadata:    map[string]any{"gateway": "stripe", "type": dev.Type},
+			Dispute:            disputeEv,
+		}, nil
 	}
 
 	var ev stripeWebhookEvent
@@ -113,4 +167,23 @@ func extractStripeWebhookMetadata(ev stripeWebhookEvent) map[string]any {
 		meta["next_action"] = na
 	}
 	return meta
+}
+
+func mapDisputeStatus(s string) string {
+	switch s {
+	case "needs_response", "warning_needs_response":
+		return "NEEDS_RESPONSE"
+	case "under_review":
+		return "UNDER_REVIEW"
+	case "won":
+		return "WON"
+	case "lost":
+		return "LOST"
+	case "accepted":
+		return "ACCEPTED"
+	case "expired":
+		return "EXPIRED"
+	default:
+		return "NEEDS_RESPONSE"
+	}
 }

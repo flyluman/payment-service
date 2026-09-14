@@ -14,6 +14,6 @@ VALUES ('stripe', 'card', 25, 5)
 ON CONFLICT (gateway_id, payment_method) DO NOTHING;
 
 INSERT INTO gateway_fee_models
-    (gateway_id, payment_method, fixed_paise, percentage_bps)
+    (gateway_id, payment_method, fixed_fee, percentage_bps)
 VALUES ('stripe', 'card', 100, 200)
 ON CONFLICT (gateway_id, payment_method) DO NOTHING;

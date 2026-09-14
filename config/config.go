@@ -119,6 +119,25 @@ type GatewayConfig struct {
 	CircuitBreakerThreshold int           `mapstructure:"circuit_breaker_threshold"`
 }
 
+type SMTPConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+	From     string `mapstructure:"from"`
+}
+
+type SMSConfig struct {
+	Provider string `mapstructure:"provider"`
+	APIKey   string `mapstructure:"api_key"`
+	From     string `mapstructure:"from"`
+}
+
+type NotificationConfig struct {
+	SMTP SMTPConfig `mapstructure:"smtp"`
+	SMS  SMSConfig  `mapstructure:"sms"`
+}
+
 type JobsConfig struct {
 	LeaseExpiryIntervalSec          int `mapstructure:"lease_expiry_interval_sec"`
 	IdempotencyProcessingTimeoutSec int `mapstructure:"idempotency_processing_timeout_sec"`
@@ -138,6 +157,7 @@ type Config struct {
 	Outbox        OutboxConfig        `mapstructure:"outbox"`
 	RateLimit     RateLimitConfig     `mapstructure:"rate_limit"`
 	Gateway       GatewayConfig       `mapstructure:"gateway"`
+	Notification  NotificationConfig  `mapstructure:"notification"`
 	Observability ObservabilityConfig `mapstructure:"observability"`
 	Security      SecurityConfig      `mapstructure:"security"`
 	Jobs          JobsConfig          `mapstructure:"jobs"`
@@ -210,6 +230,14 @@ func LoadConfig() (*Config, error) {
 		"rate_limit.refill_per_sec":        "RATE_LIMIT_REFILL_PER_SEC",
 		"gateway.http_timeout_sec":          "GATEWAY_HTTP_TIMEOUT",
 		"gateway.circuit_breaker_threshold":  "CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+		"notification.smtp.host":            "SMTP_HOST",
+		"notification.smtp.port":            "SMTP_PORT",
+		"notification.smtp.username":        "SMTP_USERNAME",
+		"notification.smtp.password":        "SMTP_PASSWORD",
+		"notification.smtp.from":            "SMTP_FROM",
+		"notification.sms.provider":         "SMS_PROVIDER",
+		"notification.sms.api_key":          "SMS_API_KEY",
+		"notification.sms.from":             "SMS_FROM",
 
 		"observability.backend":            "OBSERVABILITY_BACKEND",
 		"observability.log_level":          "LOG_LEVEL",

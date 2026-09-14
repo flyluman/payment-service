@@ -21,6 +21,11 @@ func (f *fakeTxns) GetByID(context.Context, uuid.UUID) (*transaction.Txn, error)
 	return f.txn, f.err
 }
 
+func (f *fakeTxns) UpdateStatus(_ context.Context, t *transaction.Txn) error {
+	f.txn = t
+	return nil
+}
+
 type fakeRefunds struct {
 	sum      int64
 	inserted []*domainrefund.Refund
@@ -92,8 +97,8 @@ func (noopMetrics) Histogram(string, float64, map[string]string) {}
 func (noopMetrics) Gauge(string, float64, map[string]string)     {}
 
 func succeededTxn(amount int64) *transaction.Txn {
-	t, _ := transaction.New(uuid.New(), uuid.New(), amount, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "o", nil, 30)
-	t.Status = transaction.StatusSucceeded
+	t, _ := transaction.New(uuid.New(), uuid.New(), amount, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "o", nil, 30, transaction.CaptureModeAuto)
+	t.Status = transaction.StatusCaptured
 	return t
 }
 
@@ -118,10 +123,14 @@ func (a *fakeAdapter) Refund(context.Context, ports.GatewayRefundRequest) (*port
 func (a *fakeAdapter) Cancel(context.Context, ports.GatewayCancelRequest) (*ports.GatewayCancelResponse, error) {
 	return nil, nil
 }
+func (a *fakeAdapter) CapturePayment(context.Context, ports.GatewayCaptureRequest) (*ports.GatewayCaptureResponse, error) {
+	return nil, nil
+}
 func (a *fakeAdapter) Capabilities() ports.GatewayCapabilities { return ports.GatewayCapabilities{} }
 
 func TestProcessRefund_GatewayCompleted(t *testing.T) {
 	parent := succeededTxn(100000)
+	parent.Status = transaction.StatusRefundPending
 	parent.GatewayReferenceID = "pi_1"
 	rf, _ := domainrefund.New(parent.ID, 40000, 100000, 0, "r", "by")
 	rf.AttemptedGateway = "stripe"

@@ -41,7 +41,7 @@ type OutboxEvent struct {
 
 const (
 	EventTypeTransactionCreated   = "TRANSACTION_CREATED"
-	EventTypeTransactionSucceeded = "TRANSACTION_SUCCEEDED"
+	EventTypeTransactionCaptured  = "TRANSACTION_CAPTURED"
 	EventTypeTransactionFailed    = "TRANSACTION_FAILED"
 	EventTypeTransactionCancelled = "TRANSACTION_CANCELLED"
 
@@ -54,6 +54,9 @@ const (
 	EventTypeTransactionCallback = "TRANSACTION_CALLBACK"
 
 	EventTypeGatewayInitiate = "GATEWAY_INITIATE"
+
+	EventTypeDisputeCreated = "DISPUTE_CREATED"
+	EventTypeDisputeUpdated = "DISPUTE_UPDATED"
 )
 
 type OutboxStatus string
@@ -93,6 +96,11 @@ type TenantWebhookDelivery struct {
 	EventType     string
 	Payload       []byte
 	EndpointURL   string
+	Attempts      int
+}
+
+type TenantWebhookDispatcher interface {
+	Dispatch(ctx context.Context, tenantID uuid.UUID, txnID uuid.UUID, eventType string, payload []byte) error
 }
 
 type DeadLetterFilter struct {

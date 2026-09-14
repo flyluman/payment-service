@@ -36,13 +36,22 @@ func (s stubService) GetGatewayMetadata(ctx context.Context, id uuid.UUID) (map[
 func (s stubService) ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
 	return &ports.TransactionListResult{}, nil
 }
+func (s stubService) Authorize(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	return nil, nil
+}
+func (s stubService) Capture(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	return nil, nil
+}
+func (s stubService) Settle(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	return nil, nil
+}
 
 type okPinger struct{}
 
 func (okPinger) Ping(ctx context.Context) error { return nil }
 
 func TestRouter_RoutesAndSetsRequestID(t *testing.T) {
-	txn, _ := transaction.New(uuid.New(), uuid.New(), 1000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "", "", nil, 30)
+	txn, _ := transaction.New(uuid.New(), uuid.New(), 1000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "", "", nil, 30, transaction.CaptureModeAuto)
 	logger := observability.NewSlogLoggerFromHandler(slog.NewJSONHandler(io.Discard, nil))
 
 	router := NewRouter(Deps{

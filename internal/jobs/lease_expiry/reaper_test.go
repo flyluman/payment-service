@@ -31,7 +31,7 @@ func (f *fakeRecoverer) RecoverExpiredLease(_ context.Context, id uuid.UUID) (*t
 	if f.failFor[id] {
 		return nil, errors.New("recover failed")
 	}
-	return &transaction.Txn{ID: id, Status: transaction.StatusSucceeded}, nil
+	return &transaction.Txn{ID: id, Status: transaction.StatusCaptured}, nil
 }
 
 type fakeSweeper struct {

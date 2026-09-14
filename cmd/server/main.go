@@ -25,6 +25,7 @@ import (
 	"github.com/crownroutes/payment-service/internal/app/idempotency"
 	"github.com/crownroutes/payment-service/internal/app/payment"
 	"github.com/crownroutes/payment-service/internal/app/refund"
+	twhapp "github.com/crownroutes/payment-service/internal/app/tenantwebhook"
 	"github.com/crownroutes/payment-service/internal/app/webhook"
 	reconapp "github.com/crownroutes/payment-service/internal/app/reconciliation"
 	"github.com/crownroutes/payment-service/internal/bootstrap"
@@ -61,10 +62,11 @@ type deps struct {
 	notifSvc   *notifapp.Service
 	reconSvc   *reconapp.Service
 
-	valkeyClient *valkey.Client
-	rateLimiter  *valkey.RateLimiter
-	cbStore      *valkey.CircuitBreakerStore
-	intentStore  *valkey.IntentStore
+	valkeyClient  *valkey.Client
+	rateLimiter   *valkey.RateLimiter
+	cbStore       *valkey.CircuitBreakerStore
+	intentStore   *valkey.IntentStore
+	responseCache *valkey.ResponseCacheStore
 
 	eventBus *broadcast.InMemoryBus
 }
@@ -189,14 +191,47 @@ func run() error {
 
 	disputeStore := postgres.NewDisputeStore(db)
 	disputeEvidenceStore := postgres.NewDisputeEvidenceStore(db)
-	disputeSvc := dispute.NewService(disputeStore, disputeEvidenceStore)
+	disputeSvc := dispute.NewService(disputeStore, disputeEvidenceStore, txnRepo, transactor)
 
 	notifStore := postgres.NewNotificationStore(db)
 	notifTemplateStore := postgres.NewNotificationTemplateStore(db)
 	notifPrefStore := postgres.NewNotificationPreferenceStore(db)
-	notifEmailSender := notifadapter.NewSMTPEmailSender(notifadapter.SMTPConfig{})
-	notifSMSSender := notifadapter.NewStubSMSSender(notifadapter.SMSConfig{})
+	notifEmailSender := notifadapter.NewSMTPEmailSender(notifadapter.SMTPConfig{
+		Host:     cfg.Notification.SMTP.Host,
+		Port:     cfg.Notification.SMTP.Port,
+		Username: cfg.Notification.SMTP.Username,
+		Password: cfg.Notification.SMTP.Password,
+		From:     cfg.Notification.SMTP.From,
+	})
+	notifSMSSender := notifadapter.NewStubSMSSender(notifadapter.SMSConfig{
+		Provider: cfg.Notification.SMS.Provider,
+		APIKey:   cfg.Notification.SMS.APIKey,
+		From:     cfg.Notification.SMS.From,
+	})
 	notifSvc := notifapp.NewService(notifStore, notifTemplateStore, notifPrefStore, notifEmailSender, notifSMSSender)
+
+	// Wire notification service to domain services
+	paymentSvc.SetNotificationService(notifSvc)
+	webhookSvc.SetNotificationService(notifSvc)
+	refundSvc.SetNotificationService(notifSvc)
+	disputeSvc.SetNotificationService(notifSvc)
+
+	// Wire audit log store
+	auditStore := postgres.NewAuditLogStore(db)
+	paymentSvc.SetAuditLogStore(auditStore)
+	webhookSvc.SetAuditLogStore(auditStore)
+	refundSvc.SetAuditLogStore(auditStore)
+	disputeSvc.SetAuditLogStore(auditStore)
+	cancelSvc.SetAuditLogStore(auditStore)
+
+	// Wire tenant webhook dispatcher
+	twhWriter := postgres.NewTenantWebhookWriter(db)
+	twhConfigStore := postgres.NewTenantWebhookConfigStore(db)
+	twhDispatcher := twhapp.NewDispatcher(twhWriter, twhConfigStore)
+	paymentSvc.SetTenantWebhookDispatcher(twhDispatcher)
+	webhookSvc.SetTenantWebhookDispatcher(twhDispatcher)
+	refundSvc.SetTenantWebhookDispatcher(twhDispatcher)
+	disputeSvc.SetTenantWebhookDispatcher(twhDispatcher)
 
 	reconStore := postgres.NewReconciliationStore(db)
 	reconSvc := reconapp.NewService(reconStore, txnRepo, txnRepo, registry, logger, metrics)
@@ -205,6 +240,8 @@ func run() error {
 	eventBus := broadcast.NewInMemoryBus()
 	paymentSvc.SetEventBus(eventBus)
 	webhookSvc.SetEventBus(eventBus)
+	refundSvc.SetEventBus(eventBus)
+	disputeSvc.SetEventBus(eventBus)
 
 	// ── Idempotency ──────────────────────────────────────────────────────
 	idemGuard := idempotency.NewGuard(idempotencyRepo, transactor)
@@ -220,6 +257,8 @@ func run() error {
 	})
 	intentStore := valkey.NewIntentStore(valkeyClient)
 	paymentSvc.SetIntentTracker(intentStore)
+
+	responseCache := valkey.NewResponseCacheStore(valkeyClient)
 
 	gatewaySvc := gateway.NewService(
 		configStore,
@@ -255,10 +294,11 @@ func run() error {
 		notifSvc:   notifSvc,
 		reconSvc:   reconSvc,
 
-		valkeyClient: valkeyClient,
-		rateLimiter:  rateLimiter,
-		cbStore:      cbStore,
-		intentStore:  intentStore,
+		valkeyClient:  valkeyClient,
+		rateLimiter:   rateLimiter,
+		cbStore:       cbStore,
+		intentStore:   intentStore,
+		responseCache: responseCache,
 		eventBus:     eventBus,
 	}
 

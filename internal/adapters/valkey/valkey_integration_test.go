@@ -194,3 +194,30 @@ func TestRateLimiter_NonPositiveRateDoesNotCrash(t *testing.T) {
 		t.Fatal("first request against a full bucket should be allowed even at rate 0")
 	}
 }
+
+func TestResponseCache_GetPutRoundTrip(t *testing.T) {
+	c := testsupport.RequireValkey(t)
+	testsupport.FlushValkey(t, c)
+	store := valkey.NewResponseCacheStore(c)
+	ctx := context.Background()
+
+	if hit, data, err := store.Get(ctx, "txn:abc"); err != nil || hit {
+		t.Fatalf("fresh cache key should miss, hit=%v data=%q err=%v", hit, data, err)
+	}
+
+	body := []byte(`{"transaction_id":"txn:abc"}`)
+	if err := store.Put(ctx, "txn:abc", body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	hit, data, err := store.Get(ctx, "txn:abc")
+	if err != nil {
+		t.Fatalf("get after put: %v", err)
+	}
+	if !hit {
+		t.Fatal("expected a cache hit after put")
+	}
+	if string(data) != string(body) {
+		t.Errorf("cached body mismatch:\n  want: %s\n  got:  %s", body, data)
+	}
+}

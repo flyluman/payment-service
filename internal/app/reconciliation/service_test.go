@@ -116,7 +116,7 @@ func (f *fakeMetrics) Gauge(string, float64, map[string]string) {}
 
 func TestCompareTransaction_StatusMatch(t *testing.T) {
 	svc := &Service{}
-	txn := &transaction.Txn{Status: transaction.StatusSucceeded, Amount: 50000}
+	txn := &transaction.Txn{Status: transaction.StatusCaptured, Amount: 50000}
 	se := &ports.SettlementEntry{GatewayStatus: "succeeded", GatewayAmount: 50000}
 
 	entry := svc.compareTransaction(txn, se, uuid.New())
@@ -127,7 +127,7 @@ func TestCompareTransaction_StatusMatch(t *testing.T) {
 
 func TestCompareTransaction_StatusMismatch(t *testing.T) {
 	svc := &Service{}
-	txn := &transaction.Txn{Status: transaction.StatusSucceeded, Amount: 50000}
+	txn := &transaction.Txn{Status: transaction.StatusCaptured, Amount: 50000}
 	se := &ports.SettlementEntry{GatewayStatus: "failed", GatewayAmount: 50000}
 
 	entry := svc.compareTransaction(txn, se, uuid.New())
@@ -141,7 +141,7 @@ func TestCompareTransaction_StatusMismatch(t *testing.T) {
 
 func TestCompareTransaction_AmountMismatch(t *testing.T) {
 	svc := &Service{}
-	txn := &transaction.Txn{Status: transaction.StatusSucceeded, Amount: 50000}
+	txn := &transaction.Txn{Status: transaction.StatusCaptured, Amount: 50000}
 	se := &ports.SettlementEntry{GatewayStatus: "succeeded", GatewayAmount: 51000}
 
 	entry := svc.compareTransaction(txn, se, uuid.New())
@@ -157,7 +157,7 @@ func TestCompareTransaction_FeeMismatch(t *testing.T) {
 	svc := &Service{}
 	fee := int64(1750)
 	txn := &transaction.Txn{
-		Status: transaction.StatusSucceeded,
+		Status: transaction.StatusCaptured,
 		Amount: 50000,
 		FeeBreakdown: &fees.Breakdown{
 			Fees: fees.FeeDetail{Total: 1750},
@@ -216,7 +216,7 @@ func TestRunJob_SingleTxn_CompleteMatch(t *testing.T) {
 		ID:                 txnID,
 		GatewayID:          "stripe",
 		TenantID:           uuid.New(),
-		Status:             transaction.StatusSucceeded,
+		Status:             transaction.StatusCaptured,
 		Amount:             50000,
 		GatewayReferenceID: "pi_123",
 	}
@@ -260,7 +260,7 @@ func TestRunJob_SingleTxn_MissingGateway(t *testing.T) {
 		ID:        txnID,
 		GatewayID: "stripe",
 		TenantID:  uuid.New(),
-		Status:    transaction.StatusSucceeded,
+		Status:    transaction.StatusCaptured,
 		Amount:    50000,
 	}
 

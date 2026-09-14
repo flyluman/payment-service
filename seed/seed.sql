@@ -92,7 +92,7 @@ INSERT INTO transactions (
     50000,                                    -- 50,000 IQD
     'IQD',
     'card',
-    'SUCCEEDED',
+    'CAPTURED',
     1,
     'fib',
     'fib_pay_demo_001',
@@ -129,21 +129,33 @@ VALUES (
 INSERT INTO notification_templates (name, subject, body_text, body_html, sms_text)
 VALUES
 ('PAYMENT_SUCCESS', 'Payment Successful',
- 'Your payment of {{amount}} {{currency}} was successful. Reference: {{transaction_id}}',
- '<h1>Payment Successful</h1><p>Your payment of {{amount}} {{currency}} was successful.</p><p>Reference: {{transaction_id}}</p>',
- 'Payment of {{amount}}{{currency}} successful. Ref: {{transaction_id}}'),
+ 'Your payment of {{.amount}} {{.currency}} was successful. Reference: {{.transaction_id}}',
+ '<h1>Payment Successful</h1><p>Your payment of {{.amount}} {{.currency}} was successful.</p><p>Reference: {{.transaction_id}}</p>',
+ 'Payment of {{.amount}}{{.currency}} successful. Ref: {{.transaction_id}}'),
 ('PAYMENT_FAILURE', 'Payment Failed',
- 'Your payment of {{amount}} {{currency}} has failed. Reason: {{reason}}',
- '<h1>Payment Failed</h1><p>Your payment of {{amount}} {{currency}} has failed.</p><p>Reason: {{reason}}</p>',
- 'Payment of {{amount}}{{currency}} failed: {{reason}}'),
+ 'Your payment of {{.amount}} {{.currency}} has failed. Reason: {{.reason}}',
+ '<h1>Payment Failed</h1><p>Your payment of {{.amount}} {{.currency}} has failed.</p><p>Reason: {{.reason}}</p>',
+ 'Payment of {{.amount}}{{.currency}} failed: {{.reason}}'),
 ('REFUND_COMPLETED', 'Refund Completed',
- 'A refund of {{amount}} {{currency}} has been processed for transaction {{transaction_id}}.',
- '<h1>Refund Completed</h1><p>A refund of {{amount}} {{currency}} has been processed.</p>',
- 'Refund of {{amount}}{{currency}} completed for {{transaction_id}}'),
+ 'A refund of {{.amount}} {{.currency}} has been processed for transaction {{.transaction_id}}.',
+ '<h1>Refund Completed</h1><p>A refund of {{.amount}} {{.currency}} has been processed for transaction {{.transaction_id}}.</p>',
+ 'Refund of {{.amount}}{{.currency}} completed for {{.transaction_id}}'),
 ('REFUND_FAILED', 'Refund Failed',
- 'A refund for {{amount}} {{currency}} has failed for transaction {{transaction_id}}. Reason: {{reason}}',
- '<h1>Refund Failed</h1><p>A refund has failed.</p><p>Reason: {{reason}}</p>',
- 'Refund of {{amount}}{{currency}} failed: {{reason}}')
+ 'A refund for {{.amount}} {{.currency}} has failed for transaction {{.transaction_id}}. Reason: {{.reason}}',
+ '<h1>Refund Failed</h1><p>A refund for {{.amount}} {{.currency}} has failed.</p><p>Reason: {{.reason}}</p>',
+ 'Refund of {{.amount}}{{.currency}} failed: {{.reason}}'),
+('DISPUTE_OPENED', 'Payment Disputed',
+ 'A dispute has been opened for transaction {{.transaction_id}}. Reason: {{.reason}}. Evidence due by: {{.evidence_due_by}}.',
+ '<h1>Payment Disputed</h1><p>A dispute has been opened for transaction {{.transaction_id}}.</p><p>Reason: {{.reason}}</p><p>Evidence due by: {{.evidence_due_by}}</p>',
+ 'Dispute opened for {{.transaction_id}}: {{.reason}}'),
+('DISPUTE_WON', 'Dispute Won',
+ 'The dispute for transaction {{.transaction_id}} has been won.',
+ '<h1>Dispute Won</h1><p>The dispute for transaction {{.transaction_id}} has been won.</p>',
+ 'Dispute won for {{.transaction_id}}'),
+('DISPUTE_LOST', 'Dispute Lost',
+ 'The dispute for transaction {{.transaction_id}} has been lost.',
+ '<h1>Dispute Lost</h1><p>The dispute for transaction {{.transaction_id}} has been lost.</p>',
+ 'Dispute lost for {{.transaction_id}}')
 ON CONFLICT (name) DO UPDATE SET
     subject = EXCLUDED.subject,
     body_text = EXCLUDED.body_text,
@@ -191,7 +203,7 @@ COMMIT;
 --   id: 00000000-...-0001
 --   tenant: 00000000-...-0001
 --   amount: 50,000 IQD
---   status: SUCCEEDED
+--   status: CAPTURED
 --   gateway_ref: fib_pay_demo_001
 --   raw_metadata: QR code + app links
 --

@@ -20,7 +20,7 @@ import (
 
 func newTxn(t *testing.T) *transaction.Txn {
 	t.Helper()
-	txn, err := transaction.New(uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order #42", map[string]any{"source": "test"}, 30)
+	txn, err := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "order #42", map[string]any{"source": "test"}, 30, transaction.CaptureModeAuto)
 	if err != nil {
 		t.Fatalf("build transaction: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestOutbox_WritePollMarkPublished(t *testing.T) {
 	event := ports.OutboxEvent{
 		AggregateID:   aggID,
 		AggregateType: "transaction",
-		EventType:     ports.EventTypeTransactionSucceeded,
+		EventType:     ports.EventTypeTransactionCaptured,
 		Payload:       []byte(`{"ok":true}`),
 		EventVersion:  1,
 	}

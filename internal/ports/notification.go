@@ -23,6 +23,10 @@ type NotificationPreferenceStore interface {
 	GetNotificationPreferences(ctx context.Context, tenantID uuid.UUID, userID *uuid.UUID) ([]*notification.Preference, error)
 }
 
+type NotificationDispatcher interface {
+	Dispatch(ctx context.Context, n *notification.Notification) error
+}
+
 type EmailSender interface {
 	SendEmail(ctx context.Context, to, subject, bodyText, bodyHTML string) error
 }

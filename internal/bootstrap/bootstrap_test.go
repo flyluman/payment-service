@@ -86,6 +86,9 @@ func (f *fakeTenantConfigStore) ListByTenant(_ context.Context, _ uuid.UUID) ([]
 func (f *fakeTenantConfigStore) ListActiveByTenant(_ context.Context, _ uuid.UUID) ([]*gateway.TenantGatewayConfig, error) {
 	return nil, nil
 }
+func (f *fakeTenantConfigStore) ListByGateway(_ context.Context, _ string) ([]*gateway.TenantGatewayConfig, error) {
+	return nil, nil
+}
 func (f *fakeTenantConfigStore) Upsert(_ context.Context, _ *gateway.TenantGatewayConfig) (int, error) {
 	return 0, nil
 }

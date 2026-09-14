@@ -20,6 +20,11 @@ type TenantWebhookConfigStore interface {
 	Get(ctx context.Context, tenantID uuid.UUID) (*TenantWebhookConfig, error)
 }
 
+type TenantWebhookConfigWriter interface {
+	Upsert(ctx context.Context, cfg *TenantWebhookConfig) error
+	List(ctx context.Context) ([]*TenantWebhookConfig, error)
+}
+
 type TenantWebhookConfig struct {
 	TenantID      uuid.UUID
 	EndpointURL   string

@@ -19,13 +19,13 @@ func TestPublish_DeliversToSubscriber(t *testing.T) {
 	ch := bus.Subscribe(txnID)
 	defer bus.Unsubscribe(txnID, ch)
 
-	ev := ports.StatusEvent{TransactionID: txnID, Status: transaction.StatusSucceeded}
+	ev := ports.StatusEvent{TransactionID: txnID, Status: transaction.StatusCaptured}
 	bus.Publish(context.Background(), ev)
 
 	select {
 	case got := <-ch:
-		if got.Status != transaction.StatusSucceeded {
-			t.Fatalf("expected status %s, got %s", transaction.StatusSucceeded, got.Status)
+		if got.Status != transaction.StatusCaptured {
+			t.Fatalf("expected status %s, got %s", transaction.StatusCaptured, got.Status)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for event")
@@ -40,7 +40,7 @@ func TestPublish_IgnoresDifferentTransaction(t *testing.T) {
 	ch := bus.Subscribe(txnID)
 	defer bus.Unsubscribe(txnID, ch)
 
-	bus.Publish(context.Background(), ports.StatusEvent{TransactionID: otherID, Status: transaction.StatusSucceeded})
+	bus.Publish(context.Background(), ports.StatusEvent{TransactionID: otherID, Status: transaction.StatusCaptured})
 
 	select {
 	case <-ch:
@@ -58,7 +58,7 @@ func TestPublish_NonBlockingWhenFull(t *testing.T) {
 	defer bus.Unsubscribe(txnID, ch)
 
 	bus.Publish(context.Background(), ports.StatusEvent{TransactionID: txnID, Status: transaction.StatusPending})
-	bus.Publish(context.Background(), ports.StatusEvent{TransactionID: txnID, Status: transaction.StatusSucceeded})
+	bus.Publish(context.Background(), ports.StatusEvent{TransactionID: txnID, Status: transaction.StatusCaptured})
 
 	select {
 	case got := <-ch:
@@ -77,7 +77,7 @@ func TestUnsubscribe_StopsDelivery(t *testing.T) {
 	ch := bus.Subscribe(txnID)
 	bus.Unsubscribe(txnID, ch)
 
-	bus.Publish(context.Background(), ports.StatusEvent{TransactionID: txnID, Status: transaction.StatusSucceeded})
+	bus.Publish(context.Background(), ports.StatusEvent{TransactionID: txnID, Status: transaction.StatusCaptured})
 
 	select {
 	case <-ch:

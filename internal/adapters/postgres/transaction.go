@@ -74,7 +74,7 @@ func (r *TransactionRepository) Insert(ctx context.Context, t *transaction.Txn) 
 	}
 
 	_, err = tx.Exec(ctx, `INSERT INTO transactions (
-    id, tenant_id, user_id, amount, currency, payment_method, status, version,
+    id, tenant_id, user_id, amount, currency, payment_method, status, capture_mode, version,
     gateway_id, gateway_reference_id, gateway_idempotency_key,
     attempted_gateway, actual_gateway, original_gateway,
     estimated_timeout_seconds, failure_reason, method_details, metadata,
@@ -87,20 +87,20 @@ func (r *TransactionRepository) Insert(ctx context.Context, t *transaction.Txn) 
     gateway_amount, gateway_currency,
     created_at, updated_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8,
-    $9, $10, $11,
-    $12, $13, $14,
-    $15, $16, $17, $18,
-    $19, $20, $21,
-    $22, $23, $24, $25,
-    $26, $27,
-    $28, $29, $30,
-    $31, $32, $33,
-    $34,
-    $35, $36,
-    $37, $38
+    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+    $10, $11, $12,
+    $13, $14, $15,
+    $16, $17, $18, $19,
+    $20, $21, $22,
+    $23, $24, $25, $26,
+    $27, $28,
+    $29, $30, $31,
+    $32, $33, $34,
+    $35,
+    $36, $37,
+    $38, $39
 )`,
-		t.ID, t.TenantID, t.UserID, t.Amount, t.Currency, t.PaymentMethod, t.Status, t.Version,
+		t.ID, t.TenantID, t.UserID, t.Amount, t.Currency, t.PaymentMethod, t.Status, t.CaptureMode, t.Version,
 		t.GatewayID, t.GatewayReferenceID, t.GatewayIdempotencyKey,
 		t.AttemptedGateway, t.ActualGateway, t.OriginalGateway,
 		t.EstimatedTimeoutSeconds, string(failureReason), string(methodDetails), string(metadata),
@@ -128,7 +128,7 @@ func (r *TransactionRepository) GetByID(ctx context.Context, id uuid.UUID) (*tra
 	}
 
 	row := readQueryer(ctx, r.db).QueryRow(ctx, `SELECT
-    id, tenant_id, user_id, amount, currency, payment_method, status, version,
+    id, tenant_id, user_id, amount, currency, payment_method, status, capture_mode, version,
     gateway_id, gateway_reference_id, gateway_idempotency_key,
     attempted_gateway, actual_gateway, original_gateway,
     estimated_timeout_seconds, failure_reason, method_details, metadata,
@@ -165,7 +165,7 @@ func (r *TransactionRepository) GetByGatewayReference(ctx context.Context, gatew
 	}
 
 	row := readQueryer(ctx, r.db).QueryRow(ctx, `SELECT
-    id, tenant_id, user_id, amount, currency, payment_method, status, version,
+    id, tenant_id, user_id, amount, currency, payment_method, status, capture_mode, version,
     gateway_id, gateway_reference_id, gateway_idempotency_key,
     attempted_gateway, actual_gateway, original_gateway,
     estimated_timeout_seconds, failure_reason, method_details, metadata,
@@ -349,7 +349,7 @@ func scanTransaction(row pgx.Row) (*transaction.Txn, error) {
 	var gatewayCurrency *string
 
 	err := row.Scan(
-		&t.ID, &t.TenantID, &t.UserID, &t.Amount, &t.Currency, &t.PaymentMethod, &t.Status, &t.Version,
+		&t.ID, &t.TenantID, &t.UserID, &t.Amount, &t.Currency, &t.PaymentMethod, &t.Status, &t.CaptureMode, &t.Version,
 		&t.GatewayID, &t.GatewayReferenceID, &t.GatewayIdempotencyKey,
 		&t.AttemptedGateway, &t.ActualGateway, &t.OriginalGateway,
 		&t.EstimatedTimeoutSeconds, &failureReasonRaw, &methodDetailsRaw, &t.Metadata,

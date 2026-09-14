@@ -13,7 +13,7 @@ import (
 )
 
 func processingExpiredTxn() *transaction.Txn {
-	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@example.com", "order", nil, 30)
+	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@example.com", "order", nil, 30, transaction.CaptureModeAuto)
 	t.AttemptedGateway = "stripe"
 	t.ActualGateway = "stripe"
 	t.Status = transaction.StatusProcessing
@@ -26,7 +26,7 @@ func processingExpiredTxn() *transaction.Txn {
 }
 
 func pendingTxn() *transaction.Txn {
-	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@example.com", "order", nil, 30)
+	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "stripe", uuid.New(), "b@example.com", "order", nil, 30, transaction.CaptureModeAuto)
 	t.AttemptedGateway = "stripe"
 	return t
 }
@@ -64,8 +64,8 @@ func TestProcessPayment_CancelResolutionHookFiresOnSucceededWithIntent(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != transaction.StatusSucceeded {
-		t.Fatalf("expected SUCCEEDED, got %s", got.Status)
+	if got.Status != transaction.StatusCaptured {
+		t.Fatalf("expected CAPTURED, got %s", got.Status)
 	}
 	if !resolver.called {
 		t.Fatal("expected cancel-resolution hook to fire")
@@ -154,13 +154,13 @@ func TestProcessPayment_GatewaySucceeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Status != transaction.StatusSucceeded {
-		t.Errorf("expected SUCCEEDED, got %s", got.Status)
+	if got.Status != transaction.StatusCaptured {
+		t.Errorf("expected CAPTURED, got %s", got.Status)
 	}
 	if got.GatewayReferenceID != "pi_1" {
 		t.Errorf("expected ref pi_1, got %s", got.GatewayReferenceID)
 	}
-	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeTransactionSucceeded {
+	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeTransactionCaptured {
 		t.Errorf("expected PAYMENT_SUCCEEDED outbox event, got %+v", outbox.events)
 	}
 }
@@ -289,10 +289,10 @@ func TestRecoverExpiredLease_FinalizesSucceeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Status != transaction.StatusSucceeded {
-		t.Errorf("status check found the payment SUCCEEDED; expected the stuck txn finalized, got %s", got.Status)
+	if got.Status != transaction.StatusCaptured {
+		t.Errorf("status check found the payment CAPTURED; expected the stuck txn finalized, got %s", got.Status)
 	}
-	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeTransactionSucceeded {
+	if len(outbox.events) != 1 || outbox.events[0].EventType != ports.EventTypeTransactionCaptured {
 		t.Errorf("expected one PAYMENT_SUCCEEDED event on recovery, got %+v", outbox.events)
 	}
 }

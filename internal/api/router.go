@@ -11,24 +11,25 @@ import (
 )
 
 type Deps struct {
-	Payment        *handlers.PaymentHandler
-	Pay            *handlers.PayHandler
-	Gateway        *handlers.GatewayHandler
-	TenantGateway  *handlers.TenantGatewayHandler
-	Refund         *handlers.RefundHandler
-	Cancel         *handlers.CancelHandler
-	Webhook        *handlers.WebhookHandler
-	Dispute        *handlers.DisputeHandler
-	DeadLetter     *handlers.DeadLetterHandler
-	Reconciliation *handlers.ReconciliationHandler
-	Health         *handlers.HealthHandler
-	SSE            *handlers.SSEHandler
-	UI             http.Handler
-	Logger         ports.Logger
-	Auth           middleware.TokenProvider
-	Limiter        middleware.Limiter
-	RateLimit      middleware.RateLimitConfig
-	ResponseCache  middleware.ResponseCacheStore
+	Payment           *handlers.PaymentHandler
+	Pay               *handlers.PayHandler
+	Gateway           *handlers.GatewayHandler
+	TenantGateway     *handlers.TenantGatewayHandler
+	Refund            *handlers.RefundHandler
+	Cancel            *handlers.CancelHandler
+	Webhook           *handlers.WebhookHandler
+	Dispute           *handlers.DisputeHandler
+	DeadLetter        *handlers.DeadLetterHandler
+	Reconciliation    *handlers.ReconciliationHandler
+	Health            *handlers.HealthHandler
+	SSE               *handlers.SSEHandler
+	TenantWebhookConf *handlers.TenantWebhookConfigHandler
+	UI                http.Handler
+	Logger            ports.Logger
+	Auth              middleware.TokenProvider
+	Limiter           middleware.Limiter
+	RateLimit         middleware.RateLimitConfig
+	ResponseCache     middleware.ResponseCacheStore
 }
 
 func NewRouter(deps Deps) http.Handler {
@@ -52,6 +53,9 @@ func NewRouter(deps Deps) http.Handler {
 		mux.HandleFunc("GET /api/v1/payments", deps.Payment.List)
 		mux.HandleFunc("POST /api/v1/payments", deps.Payment.Create)
 		mux.HandleFunc("GET /api/v1/payments/{id}", deps.Payment.Get)
+		mux.HandleFunc("POST /api/v1/payments/{id}/authorize", deps.Payment.Authorize)
+		mux.HandleFunc("POST /api/v1/payments/{id}/capture", deps.Payment.Capture)
+		mux.HandleFunc("POST /api/v1/payments/{id}/settle", deps.Payment.Settle)
 	}
 	if deps.Gateway != nil {
 		mux.HandleFunc("GET /api/v1/gateways", deps.Gateway.List)
@@ -91,6 +95,10 @@ func NewRouter(deps Deps) http.Handler {
 		mux.HandleFunc("POST /api/v1/reconciliation/jobs/{id}/run", deps.Reconciliation.RunJob)
 		mux.HandleFunc("GET /api/v1/reconciliation/jobs/{id}/entries", deps.Reconciliation.GetEntries)
 		mux.HandleFunc("POST /api/v1/reconciliation/jobs/{id}/entries/{entry_id}/resolve", deps.Reconciliation.ResolveEntry)
+	}
+	if deps.TenantWebhookConf != nil {
+		mux.HandleFunc("GET /api/v1/tenant-webhooks", deps.TenantWebhookConf.List)
+		mux.HandleFunc("POST /api/v1/tenant-webhooks/{tenant_id}", deps.TenantWebhookConf.Upsert)
 	}
 
 	// Static UI (legacy, optional)

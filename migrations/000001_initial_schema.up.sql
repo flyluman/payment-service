@@ -76,9 +76,12 @@ CREATE TABLE transactions (
                              CHECK (payment_method IN ('card', 'upi', 'netbanking', 'wallet')),
     status                   TEXT        NOT NULL DEFAULT 'PENDING'
                              CHECK (status IN (
-                                 'PENDING', 'PROCESSING', 'SUCCEEDED', 'FAILED',
-                                 'CANCELLED', 'REFUNDED', 'REFUND_FAILED'
+                                 'PENDING', 'PROCESSING', 'AUTHORIZED', 'CAPTURED', 'SETTLED',
+                                 'FAILED', 'CANCELLED', 'REFUND_PENDING', 'PARTIALLY_REFUNDED',
+                                 'REFUNDED', 'REFUND_FAILED', 'DISPUTED'
                              )),
+    capture_mode             TEXT        NOT NULL DEFAULT 'auto'
+                             CHECK (capture_mode IN ('auto', 'manual')),
     version                  INT         NOT NULL DEFAULT 1 CHECK (version >= 1),
     gateway_id               TEXT        NOT NULL,
     gateway_reference_id     TEXT,

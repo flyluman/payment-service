@@ -69,6 +69,13 @@ func (f fakeWebhookTenantStore) Get(_ context.Context, _ uuid.UUID, _ string) (*
 	return f.cfg, nil
 }
 
+func (f fakeWebhookTenantStore) ListByGateway(_ context.Context, _ string) ([]*gateway.TenantGatewayConfig, error) {
+	if f.cfg != nil {
+		return []*gateway.TenantGatewayConfig{f.cfg}, nil
+	}
+	return nil, nil
+}
+
 func okEvent() *ports.GatewayWebhookEvent {
 	return &ports.GatewayWebhookEvent{EventID: "evt_1", GatewayReferenceID: "ref_1", Status: ports.GatewayPaymentStatusSucceeded}
 }
@@ -77,12 +84,12 @@ func newWebhookHandler(proc *fakeWebhookProcessor, parser ports.GatewayWebhookPa
 	resolver := fakeWebhookResolver{parser: parser, ok: parser != nil}
 	txnRepo := fakeWebhookTxnRepo{txn: txn}
 	tenantStore := fakeWebhookTenantStore{cfg: cfg}
-	return NewWebhookHandler(proc, resolver, txnRepo, tenantStore, noopLog{})
+	return NewWebhookHandler(proc, resolver, txnRepo, tenantStore, nil, noopLog{})
 }
 
 func validTxn() *transaction.Txn {
 	tenantID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-	txn, _ := transaction.New(tenantID, uuid.Nil, 1000, "IQD", transaction.PaymentMethodCard, "fib", uuid.Nil, "", "", nil, 300)
+	txn, _ := transaction.New(tenantID, uuid.Nil, 1000, "IQD", transaction.PaymentMethodCard, "fib", uuid.Nil, "", "", nil, 300, transaction.CaptureModeAuto)
 	return txn
 }
 
@@ -103,14 +110,14 @@ func postWebhookV2(h *WebhookHandler, gateway, txnID string) *httptest.ResponseR
 	return rec
 }
 
-func TestWebhook_MissingTransactionID(t *testing.T) {
+func TestWebhook_MissingTransactionIDAndNoTenantConfig(t *testing.T) {
 	h := newWebhookHandler(&fakeWebhookProcessor{}, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/gateway/stripe", strings.NewReader(`raw`))
 	req.SetPathValue("gateway_id", "stripe")
 	rec := httptest.NewRecorder()
 	h.Handle(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for missing transaction_id, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing transaction_id with no tenant config, got %d", rec.Code)
 	}
 }
 
@@ -150,7 +157,7 @@ func TestWebhook_UnknownGateway404(t *testing.T) {
 	proc := &fakeWebhookProcessor{}
 	// resolver returns ok=false (no parser registered)
 	txn := validTxn()
-	h := NewWebhookHandler(proc, fakeWebhookResolver{ok: false}, fakeWebhookTxnRepo{txn: txn}, fakeWebhookTenantStore{cfg: fibConfig()}, noopLog{})
+	h := NewWebhookHandler(proc, fakeWebhookResolver{ok: false}, fakeWebhookTxnRepo{txn: txn}, fakeWebhookTenantStore{cfg: fibConfig()}, nil, noopLog{})
 	rec := postWebhookV2(h, "mystery", txn.ID.String())
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unregistered gateway, got %d", rec.Code)

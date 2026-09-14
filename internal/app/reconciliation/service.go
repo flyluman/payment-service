@@ -310,9 +310,9 @@ func (s *Service) compareTransaction(txn *transaction.Txn, se *ports.SettlementE
 		entry.InternalFees = &fee
 	}
 
-	if txn.Status == transaction.StatusSucceeded && se.GatewayStatus != "succeeded" {
+	if isInternalSuccess(txn.Status) && se.GatewayStatus != "succeeded" {
 		entry.MismatchType = reconciliation.MismatchStatus
-	} else if txn.Status != transaction.StatusSucceeded && se.GatewayStatus == "succeeded" {
+	} else if !isInternalSuccess(txn.Status) && se.GatewayStatus == "succeeded" {
 		entry.MismatchType = reconciliation.MismatchStatus
 	} else if txn.Amount != se.GatewayAmount {
 		entry.MismatchType = reconciliation.MismatchAmount
@@ -369,4 +369,12 @@ func feeDiscrepancy(internal, gateway *int64) int64 {
 // roundUp rounds a float64 up to the nearest integer.
 func roundUp(f float64) int64 {
 	return int64(math.Ceil(f))
+}
+
+func isInternalSuccess(s transaction.Status) bool {
+	switch s {
+	case transaction.StatusCaptured, transaction.StatusSettled:
+		return true
+	}
+	return false
 }

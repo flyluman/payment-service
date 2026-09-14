@@ -6,43 +6,24 @@ import (
 	"context"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/crownroutes/payment-service/internal/adapters/observability"
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	appwebhook "github.com/crownroutes/payment-service/internal/app/webhook"
-	"github.com/crownroutes/payment-service/internal/domain/payment"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	"github.com/crownroutes/payment-service/internal/testsupport"
 )
-
-func seedProcessingTxn(t *testing.T, pg *testsupport.PG, gatewayID, reference string) *payment.Payment {
-	t.Helper()
-	repo := postgres.NewPaymentRepository(pg.DB, pg.Q)
-	tr := postgres.NewTransactor(pg.DB)
-
-	txn, err := payment.New(uuid.New(), 150000, "BDT", payment.PaymentMethodCard, gatewayID, uuid.New(), "b@e.com", "o", nil, 30)
-	if err != nil {
-		t.Fatal(err)
-	}
-	txn.Status = payment.StatusProcessing
-	txn.GatewayReferenceID = reference
-	if err := tr.WithinTx(context.Background(), func(ctx context.Context) error { return repo.Insert(ctx, txn) }); err != nil {
-		t.Fatalf("seed processing txn: %v", err)
-	}
-	return txn
-}
 
 func TestWebhook_ResolvesProcessingTransaction(t *testing.T) {
 	pg := testsupport.RequirePostgres(t)
 	pg.Truncate(t, "transactions", "webhook_events", "transaction_gateway_metadata", "outbox_events")
 	ctx := context.Background()
 
-	txn := seedProcessingTxn(t, pg, "razorpay", "order_int")
+	txn := seedTransaction(t, pg, transaction.StatusProcessing, 150000, "razorpay", "order_int")
 
 	svc := appwebhook.NewService(
-		postgres.NewPaymentRepository(pg.DB, pg.Q),
-		postgres.NewWebhookRepository(pg.DB, pg.Q),
-		postgres.NewOutboxWriter(pg.DB, pg.Q),
+		postgres.NewTransactionRepository(pg.DB),
+		postgres.NewWebhookRepository(pg.DB),
+		postgres.NewOutboxWriter(pg.DB),
 		postgres.NewTransactor(pg.DB),
 		discardLogger(),
 		observability.NewNoopMetrics(),
@@ -54,13 +35,13 @@ func TestWebhook_ResolvesProcessingTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	if !out.Resolved || out.Status != payment.StatusSucceeded {
-		t.Fatalf("expected resolved to SUCCEEDED, got %+v", out)
+	if !out.Resolved || out.Status != transaction.StatusCaptured {
+		t.Fatalf("expected resolved to CAPTURED, got %+v", out)
 	}
 
-	persisted, _ := postgres.NewPaymentRepository(pg.DB, pg.Q).GetByID(ctx, txn.ID)
-	if persisted.Status != payment.StatusSucceeded {
-		t.Errorf("transaction should be SUCCEEDED in DB, got %s", persisted.Status)
+	persisted, _ := postgres.NewTransactionRepository(pg.DB).GetByID(ctx, txn.ID)
+	if persisted.Status != transaction.StatusCaptured {
+		t.Errorf("transaction should be CAPTURED in DB, got %s", persisted.Status)
 	}
 
 	var rawCount, eventCount int

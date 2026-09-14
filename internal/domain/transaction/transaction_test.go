@@ -7,13 +7,13 @@ import (
 	"github.com/google/uuid"
 )
 
-func validNewArgs() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-	return uuid.New(), uuid.New(), 150000, "BDT", PaymentMethodCard, "razorpay", uuid.New(), "buyer@example.com", "order #42", nil, 30
+func validNewArgs() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+	return uuid.New(), uuid.New(), 150000, "BDT", PaymentMethodCard, "razorpay", uuid.New(), "buyer@example.com", "order #42", nil, 30, CaptureModeAuto
 }
 
 func TestNew_Valid(t *testing.T) {
-	m, _, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
-	tx, err := New(m, uuid.New(), a, c, pm, g, cust, email, desc, meta, to)
+	m, _, a, c, pm, g, cust, email, desc, meta, to, cm := validNewArgs()
+	tx, err := New(m, uuid.New(), a, c, pm, g, cust, email, desc, meta, to, cm)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -32,34 +32,34 @@ func TestNew_Valid(t *testing.T) {
 }
 
 func TestNew_Invalid(t *testing.T) {
-	m, _, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
+	m, _, a, c, pm, g, cust, email, desc, meta, to, cm := validNewArgs()
 	cases := []struct {
 		name string
-		mut  func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int)
+		mut  func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode)
 	}{
-		{"zero amount", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, uuid.New(), 0, c, pm, g, cust, email, desc, meta, to
+		{"zero amount", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+			return m, uuid.New(), 0, c, pm, g, cust, email, desc, meta, to, cm
 		}},
-		{"negative amount", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, uuid.New(), -5, c, pm, g, cust, email, desc, meta, to
+		{"negative amount", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+			return m, uuid.New(), -5, c, pm, g, cust, email, desc, meta, to, cm
 		}},
-		{"lowercase currency", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, uuid.New(), a, "bdt", pm, g, cust, email, desc, meta, to
+		{"lowercase currency", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+			return m, uuid.New(), a, "bdt", pm, g, cust, email, desc, meta, to, cm
 		}},
-		{"bad currency length", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, uuid.New(), a, "RUPEE", pm, g, cust, email, desc, meta, to
+		{"bad currency length", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+			return m, uuid.New(), a, "RUPEE", pm, g, cust, email, desc, meta, to, cm
 		}},
-		{"invalid method", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, uuid.New(), a, c, PaymentMethod("crypto"), g, cust, email, desc, meta, to
+		{"invalid method", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+			return m, uuid.New(), a, c, PaymentMethod("crypto"), g, cust, email, desc, meta, to, cm
 		}},
-		{"nil merchant", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return uuid.Nil, uuid.New(), a, c, pm, g, cust, email, desc, meta, to
+		{"nil merchant", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+			return uuid.Nil, uuid.New(), a, c, pm, g, cust, email, desc, meta, to, cm
 		}},
-		{"empty gateway", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, uuid.New(), a, c, pm, "", cust, email, desc, meta, to
+		{"empty gateway", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+			return m, uuid.New(), a, c, pm, "", cust, email, desc, meta, to, cm
 		}},
-		{"zero timeout", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int) {
-			return m, uuid.New(), a, c, pm, g, cust, email, desc, meta, 0
+		{"zero timeout", func() (uuid.UUID, uuid.UUID, int64, string, PaymentMethod, string, uuid.UUID, string, string, map[string]any, int, CaptureMode) {
+			return m, uuid.New(), a, c, pm, g, cust, email, desc, meta, 0, cm
 		}},
 	}
 	for _, tc := range cases {
@@ -73,7 +73,7 @@ func TestNew_Invalid(t *testing.T) {
 
 func TestStatus_IsTerminal(t *testing.T) {
 	terminal := map[Status]bool{
-		StatusSucceeded: true, StatusCancelled: true, StatusRefunded: true, StatusRefundFailed: true, StatusPending: false, StatusProcessing: false, StatusFailed: false, }
+		StatusCaptured: true, StatusCancelled: true, StatusRefunded: true, StatusRefundFailed: true, StatusPending: false, StatusProcessing: false, StatusFailed: false, }
 	for s, want := range terminal {
 		if s.IsTerminal() != want {
 			t.Errorf("%s.IsTerminal() = %v, want %v", s, s.IsTerminal(), want)
@@ -139,8 +139,8 @@ func TestSetCancelIntent(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	m, _, a, c, pm, g, cust, email, desc, meta, to := validNewArgs()
-	tx, _ := New(m, uuid.New(), a, c, pm, g, cust, email, desc, meta, to)
+	m, _, a, c, pm, g, cust, email, desc, meta, to, cm := validNewArgs()
+	tx, _ := New(m, uuid.New(), a, c, pm, g, cust, email, desc, meta, to, cm)
 	if err := tx.Validate(); err != nil {
 		t.Fatalf("valid transaction failed validation: %v", err)
 	}

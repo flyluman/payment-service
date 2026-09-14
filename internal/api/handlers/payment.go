@@ -25,6 +25,9 @@ type PaymentService interface {
 	GetPayment(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
 	GetGatewayMetadata(ctx context.Context, transactionID uuid.UUID) (map[string]any, error)
 	ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error)
+	Authorize(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error)
+	Capture(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error)
+	Settle(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error)
 }
 
 type PaymentHandler struct {
@@ -36,16 +39,17 @@ func NewPaymentHandler(svc PaymentService) *PaymentHandler {
 }
 
 type createPaymentRequest struct {
-	GatewayID     string         `json:"gateway_id"`
-	Amount        int64          `json:"amount"`
-	Currency      string         `json:"currency"`
-	PaymentMethod string         `json:"payment_method"`
-	CustomerID    string         `json:"customer_id,omitempty"`
-	CustomerEmail string         `json:"customer_email,omitempty"`
-	Description   string         `json:"description,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
-	CallbackURL   string         `json:"callback_url"`
-	RedirectURL   string         `json:"redirect_url"`
+	GatewayID      string         `json:"gateway_id"`
+	Amount         int64          `json:"amount"`
+	Currency       string         `json:"currency"`
+	PaymentMethod  string         `json:"payment_method"`
+	CaptureMode    string         `json:"capture_mode,omitempty"`
+	CustomerID     string         `json:"customer_id,omitempty"`
+	CustomerEmail  string         `json:"customer_email,omitempty"`
+	Description    string         `json:"description,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	CallbackURL    string         `json:"callback_url"`
+	RedirectURL    string         `json:"redirect_url"`
 }
 
 type createPaymentResponse struct {
@@ -144,6 +148,7 @@ func (h *PaymentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Amount:         req.Amount,
 		Currency:       req.Currency,
 		PaymentMethod:  transaction.PaymentMethod(req.PaymentMethod),
+		CaptureMode:    transaction.CaptureMode(req.CaptureMode),
 		CustomerID:     customerID,
 		CustomerEmail:  req.CustomerEmail,
 		Description:    req.Description,
@@ -401,4 +406,67 @@ func (h *PaymentHandler) writeCSV(w http.ResponseWriter, r *http.Request, result
 			t.GatewayID, t.PaymentMethod, t.CreatedAt.Format(time.RFC3339Nano),
 		})
 	}
+}
+
+func (h *PaymentHandler) Authorize(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_id", "transaction id must be a valid UUID")
+		return
+	}
+
+	txn, err := h.svc.Authorize(r.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, payment.ErrInvalidTransition):
+			writeError(w, r, http.StatusConflict, "invalid_transition", err.Error())
+		default:
+			writeError(w, r, http.StatusInternalServerError, "authorize_failed", "could not authorize payment")
+		}
+		return
+	}
+
+	writeJSON(w, r, http.StatusOK, toPaymentResponse(txn))
+}
+
+func (h *PaymentHandler) Capture(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_id", "transaction id must be a valid UUID")
+		return
+	}
+
+	txn, err := h.svc.Capture(r.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, payment.ErrInvalidTransition):
+			writeError(w, r, http.StatusConflict, "invalid_transition", err.Error())
+		default:
+			writeError(w, r, http.StatusInternalServerError, "capture_failed", "could not capture payment")
+		}
+		return
+	}
+
+	writeJSON(w, r, http.StatusOK, toPaymentResponse(txn))
+}
+
+func (h *PaymentHandler) Settle(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_id", "transaction id must be a valid UUID")
+		return
+	}
+
+	txn, err := h.svc.Settle(r.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, payment.ErrInvalidTransition):
+			writeError(w, r, http.StatusConflict, "invalid_transition", err.Error())
+		default:
+			writeError(w, r, http.StatusInternalServerError, "settle_failed", "could not settle payment")
+		}
+		return
+	}
+
+	writeJSON(w, r, http.StatusOK, toPaymentResponse(txn))
 }

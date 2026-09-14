@@ -5,6 +5,7 @@ package postgres_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -37,7 +38,7 @@ func TestTenantConfigStore_EncryptDecryptRoundTrip(t *testing.T) {
 		TenantID: tenantID,
 		GatewayID: "stripe",
 		Provider:  gateway.ProviderStripe,
-		Config:    rawConfig,
+		Config:    json.RawMessage(rawConfig),
 		IsActive:  true,
 	}
 
@@ -89,7 +90,7 @@ func TestTenantConfigStore_EncryptedBytesDontContainPlaintext(t *testing.T) {
 		TenantID: tenantID,
 		GatewayID: "stripe",
 		Provider:  gateway.ProviderStripe,
-		Config:    rawConfig,
+		Config:    json.RawMessage(rawConfig),
 		IsActive:  true,
 	}
 
@@ -132,7 +133,7 @@ func TestTenantConfigStore_WrongEncryptionKeyFails(t *testing.T) {
 		TenantID: tenantID,
 		GatewayID: "stripe",
 		Provider:  gateway.ProviderStripe,
-		Config:    rawConfig,
+		Config:    json.RawMessage(rawConfig),
 		IsActive:  true,
 	}
 
@@ -167,10 +168,10 @@ func TestTenantConfigStore_NoEncryptorUsesPlaintext(t *testing.T) {
 	tenantID := uuid.New()
 	rawConfig := `{"api_key":"sk_test_dev_key"}`
 	cfg := &gateway.TenantGatewayConfig{
-		TenantID: tenantID,
-		GatewayID: "razorpay",
-		Provider:  gateway.ProviderRazorpay,
-		Config:    rawConfig,
+		TenantID:  tenantID,
+		GatewayID: "stripe",
+		Provider:  gateway.ProviderStripe,
+		Config:    json.RawMessage(rawConfig),
 		IsActive:  true,
 	}
 
@@ -178,7 +179,7 @@ func TestTenantConfigStore_NoEncryptorUsesPlaintext(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	got, err := store.Get(ctx, tenantID, "razorpay")
+	got, err := store.Get(ctx, tenantID, "stripe")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestTenantConfigStore_NoEncryptorUsesPlaintext(t *testing.T) {
 	}
 
 	var stored []byte
-	err = pg.DB.Pool().QueryRow(ctx, `SELECT encrypted_config FROM tenant_gateway_configs WHERE tenant_id = $1 AND gateway_id = 'razorpay'`, tenantID).Scan(&stored)
+	err = pg.DB.Pool().QueryRow(ctx, `SELECT encrypted_config FROM tenant_gateway_configs WHERE tenant_id = $1 AND gateway_id = 'stripe'`, tenantID).Scan(&stored)
 	if err != nil {
 		t.Fatalf("read raw encrypted_config: %v", err)
 	}

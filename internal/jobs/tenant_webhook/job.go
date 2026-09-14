@@ -15,11 +15,13 @@ import (
 )
 
 type Worker struct {
-	reader  ports.TenantWebhookDeliveryReader
-	updater ports.TenantWebhookDeliveryUpdater
-	config  ports.TenantWebhookConfigStore
-	client  *http.Client
-	logger  logger
+	reader       ports.TenantWebhookDeliveryReader
+	updater      ports.TenantWebhookDeliveryUpdater
+	config       ports.TenantWebhookConfigStore
+	client       *http.Client
+	logger       logger
+	maxAttempts  int
+	maxBackoff   time.Duration
 }
 
 type logger interface {
@@ -43,12 +45,22 @@ func NewWorker(
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
+	maxAttempts := cfg.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 10
+	}
+	maxBackoff := time.Duration(cfg.MaxBackoffSec) * time.Second
+	if maxBackoff <= 0 {
+		maxBackoff = 30 * time.Second
+	}
 	return &Worker{
-		reader:  reader,
-		updater: updater,
-		config:  config,
-		client:  &http.Client{Timeout: timeout},
-		logger:  logger,
+		reader:      reader,
+		updater:     updater,
+		config:      config,
+		client:      &http.Client{Timeout: timeout},
+		logger:      logger,
+		maxAttempts: maxAttempts,
+		maxBackoff:  maxBackoff,
 	}
 }
 
@@ -73,15 +85,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 func (w *Worker) deliver(ctx context.Context, d ports.TenantWebhookDelivery) error {
 	cfg, err := w.config.Get(ctx, d.TenantID)
 	if err != nil {
-		return w.updater.MarkFailed(ctx, d.ID, 1, fmt.Sprintf("get config: %v", err), time.Now().Add(30*time.Second))
+		return w.updater.MarkFailed(ctx, d.ID, d.Attempts+1, fmt.Sprintf("get config: %v", err), time.Now().Add(w.maxBackoff))
 	}
 	if cfg == nil || !cfg.IsActive {
-		return w.updater.MarkFailed(ctx, d.ID, 1, "webhook config not found or inactive", time.Now().Add(30*time.Second))
+		return w.updater.MarkFailed(ctx, d.ID, d.Attempts+1, "webhook config not found or inactive", time.Now().Add(w.maxBackoff))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.EndpointURL, bytes.NewReader(d.Payload))
 	if err != nil {
-		return w.updater.MarkFailed(ctx, d.ID, 1, fmt.Sprintf("build request: %v", err), time.Now().Add(30*time.Second))
+		return w.updater.MarkFailed(ctx, d.ID, d.Attempts+1, fmt.Sprintf("build request: %v", err), time.Now().Add(w.maxBackoff))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Webhook-Event", d.EventType)
@@ -94,7 +106,7 @@ func (w *Worker) deliver(ctx context.Context, d ports.TenantWebhookDelivery) err
 
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return w.updater.MarkFailed(ctx, d.ID, 1, fmt.Sprintf("http request: %v", err), time.Now().Add(30*time.Second))
+		return w.updater.MarkFailed(ctx, d.ID, d.Attempts+1, fmt.Sprintf("http request: %v", err), time.Now().Add(w.maxBackoff))
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
@@ -103,7 +115,7 @@ func (w *Worker) deliver(ctx context.Context, d ports.TenantWebhookDelivery) err
 		return w.updater.MarkDelivered(ctx, d.ID)
 	}
 
-	return w.updater.MarkFailed(ctx, d.ID, 1, fmt.Sprintf("HTTP %d", resp.StatusCode), time.Now().Add(30*time.Second))
+	return w.updater.MarkFailed(ctx, d.ID, d.Attempts+1, fmt.Sprintf("HTTP %d", resp.StatusCode), time.Now().Add(w.maxBackoff))
 }
 
 func signPayload(payload []byte, secret string) string {

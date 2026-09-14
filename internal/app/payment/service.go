@@ -69,6 +69,8 @@ type Service struct {
 	idem           *idempotency.Guard
 	gatewayMetaStore  GatewayMetadataStore
 	audit          ports.AuditLogStore
+	notif          ports.NotificationDispatcher
+	twDispatcher   ports.TenantWebhookDispatcher
 	log            ports.Logger
 	metrics        ports.MetricRecorder
 	bus            ports.EventBus
@@ -81,6 +83,8 @@ func (s *Service) SetIdempotency(g *idempotency.Guard)  { s.idem = g }
 func (s *Service) SetGatewayMetadataStore(w GatewayMetadataStore) { s.gatewayMetaStore = w }
 func (s *Service) SetEventBus(bus ports.EventBus)          { s.bus = bus }
 func (s *Service) SetAuditLogStore(a ports.AuditLogStore)  { s.audit = a }
+func (s *Service) SetNotificationService(n ports.NotificationDispatcher) { s.notif = n }
+func (s *Service) SetTenantWebhookDispatcher(d ports.TenantWebhookDispatcher) { s.twDispatcher = d }
 
 func NewService(
 	repo TransactionRepository,
@@ -225,6 +229,7 @@ func (s *Service) ProcessGatewayInitiate(ctx context.Context, transactionID uuid
 		if err := s.repo.UpdateGatewayReference(ctx, txn.ID, resp.GatewayReferenceID, txn.Version); err != nil {
 			return fmt.Errorf("update gateway reference: %w", err)
 		}
+		txn.GatewayReferenceID = resp.GatewayReferenceID
 		if s.gatewayMetaStore != nil && len(resp.GatewayMetadata) > 0 {
 			metaPayload, err := json.Marshal(resp.GatewayMetadata)
 			if err != nil {
@@ -294,6 +299,7 @@ type CreateInput struct {
 	Amount         int64
 	Currency       string
 	PaymentMethod  transaction.PaymentMethod
+	CaptureMode    transaction.CaptureMode
 	CustomerID     uuid.UUID
 	CustomerEmail  string
 	Description    string
@@ -354,6 +360,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (CreateResult, err
 		in.Description,
 		in.Metadata,
 		timeoutSec,
+		in.CaptureMode,
 	)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("payment: build transaction: %w", err)
@@ -439,6 +446,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (CreateResult, err
 			return CreateResult{}, err
 		}
 		s.logCreated(txn)
+		if txn.CaptureMode == transaction.CaptureModeManual {
+			return CreateResult{Verdict: idempotency.Created, Transaction: txn, Token: rawToken}, nil
+		}
 		reloaded, err := s.syncInitiate(ctx, txn)
 		if err != nil {
 			return CreateResult{Verdict: idempotency.Created, Transaction: reloaded, Token: rawToken}, err
@@ -550,6 +560,197 @@ func identityKey(in CreateInput) string {
 
 func (s *Service) ListTransactions(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
 	return s.repo.List(ctx, filter)
+}
+
+var ErrInvalidTransition = errors.New("payment: invalid state transition")
+
+func (s *Service) Authorize(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	txn, err := s.repo.GetByID(ctx, transactionID)
+	if err != nil {
+		return nil, fmt.Errorf("payment: load transaction %s: %w", transactionID, err)
+	}
+	if txn.CaptureMode != transaction.CaptureModeManual {
+		return nil, fmt.Errorf("payment: authorize requires manual capture mode, got %s", txn.CaptureMode)
+	}
+	if err := transaction.TransitionState(txn, transaction.StatusProcessing, transaction.ActorSystem); err != nil {
+		return nil, ErrInvalidTransition
+	}
+	now := time.Now().UTC()
+	txn.ProcessingStartedAt = &now
+	timeout := time.Duration(txn.EstimatedTimeoutSeconds) * time.Second
+	txn.ProcessingTimeout = &timeout
+	if err := s.repo.UpdateStatus(ctx, txn); err != nil {
+		return nil, fmt.Errorf("payment: update status %s: %w", transactionID, err)
+	}
+
+	adapter, err := s.gateways.Get(txn.GatewayID)
+	if err != nil {
+		return nil, fmt.Errorf("payment: resolve adapter for %s: %w", txn.GatewayID, err)
+	}
+
+	resp, gwErr := s.callGateway(ctx, adapter, txn)
+	if gwErr != nil {
+		if gwErr.Category == ports.ErrorCategoryAmbiguous || gwErr.Category == ports.ErrorCategoryNetworkTimeout {
+			return txn, nil
+		}
+		if err := transaction.TransitionState(txn, transaction.StatusFailed, transaction.ActorGateway); err != nil {
+			return nil, err
+		}
+		txn.FailureReason = &transaction.FailureReason{
+			Category:       string(gwErr.Category),
+			Code:           gwErr.Code,
+			GatewayCode:    gwErr.GatewayCode,
+			GatewayMessage: gwErr.GatewayMessage,
+			Source:         transaction.FailureReasonSourceGateway,
+		}
+		if err := s.repo.UpdateStatus(ctx, txn); err != nil {
+			return nil, fmt.Errorf("payment: update status %s: %w", transactionID, err)
+		}
+		return txn, nil
+	}
+
+	if resp.GatewayReferenceID != "" {
+		txn.GatewayReferenceID = resp.GatewayReferenceID
+	}
+	txn.ActualGateway = txn.GatewayID
+
+	switch resp.Status {
+	case ports.GatewayPaymentStatusSucceeded, ports.GatewayPaymentStatusPending:
+		if err := transaction.TransitionState(txn, transaction.StatusAuthorized, transaction.ActorGateway); err != nil {
+			return nil, err
+		}
+	case ports.GatewayPaymentStatusFailed:
+		if err := transaction.TransitionState(txn, transaction.StatusFailed, transaction.ActorGateway); err != nil {
+			return nil, err
+		}
+		txn.FailureReason = &transaction.FailureReason{
+			Category:       "gateway_declined",
+			Code:           resp.ErrorCode,
+			GatewayCode:    resp.ErrorCode,
+			GatewayMessage: resp.ErrorMessage,
+			Source:         transaction.FailureReasonSourceGateway,
+		}
+	default:
+		if err := transaction.TransitionState(txn, transaction.StatusFailed, transaction.ActorGateway); err != nil {
+			return nil, err
+		}
+	}
+	txn.ProcessingStartedAt = nil
+	txn.ProcessingTimeout = nil
+	if err := s.repo.UpdateStatus(ctx, txn); err != nil {
+		return nil, fmt.Errorf("payment: update status %s: %w", transactionID, err)
+	}
+	return txn, nil
+}
+
+func (s *Service) Capture(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	txn, err := s.repo.GetByID(ctx, transactionID)
+	if err != nil {
+		return nil, fmt.Errorf("payment: load transaction %s: %w", transactionID, err)
+	}
+	if txn.Status != transaction.StatusAuthorized {
+		return nil, ErrInvalidTransition
+	}
+	if err := transaction.TransitionState(txn, transaction.StatusProcessing, transaction.ActorSystem); err != nil {
+		return nil, ErrInvalidTransition
+	}
+	now := time.Now().UTC()
+	txn.ProcessingStartedAt = &now
+	timeout := time.Duration(txn.EstimatedTimeoutSeconds) * time.Second
+	txn.ProcessingTimeout = &timeout
+	if err := s.repo.UpdateStatus(ctx, txn); err != nil {
+		return nil, fmt.Errorf("payment: update status %s: %w", transactionID, err)
+	}
+
+	adapter, err := s.gateways.Get(txn.GatewayID)
+	if err != nil {
+		return nil, fmt.Errorf("payment: resolve adapter for %s: %w", txn.GatewayID, err)
+	}
+
+	resp, rawErr := adapter.CapturePayment(ctx, ports.GatewayCaptureRequest{
+		TransactionID:      txn.ID,
+		GatewayReferenceID: txn.GatewayReferenceID,
+		Amount:             txn.Amount,
+		Currency:           txn.Currency,
+	})
+	var gwErr *ports.GatewayError
+	if rawErr != nil {
+		if !errors.As(rawErr, &gwErr) {
+			gwErr = &ports.GatewayError{
+				Category:       ports.ErrorCategoryGatewayError,
+				Code:           "capture_call_failed",
+				GatewayMessage: rawErr.Error(),
+				Underlying:     rawErr,
+			}
+		}
+	}
+	if gwErr != nil {
+		if gwErr.Category == ports.ErrorCategoryAmbiguous || gwErr.Category == ports.ErrorCategoryNetworkTimeout {
+			txn.ProcessingStartedAt = nil
+			txn.ProcessingTimeout = nil
+			_ = s.repo.UpdateStatus(ctx, txn)
+			return txn, nil
+		}
+		if err := transaction.TransitionState(txn, transaction.StatusFailed, transaction.ActorGateway); err != nil {
+			return nil, err
+		}
+		txn.FailureReason = &transaction.FailureReason{
+			Category:       string(gwErr.Category),
+			Code:           gwErr.Code,
+			GatewayCode:    gwErr.GatewayCode,
+			GatewayMessage: gwErr.GatewayMessage,
+			Source:         transaction.FailureReasonSourceGateway,
+		}
+		txn.ProcessingStartedAt = nil
+		txn.ProcessingTimeout = nil
+		if err := s.repo.UpdateStatus(ctx, txn); err != nil {
+			return nil, fmt.Errorf("payment: update status %s: %w", transactionID, err)
+		}
+		return txn, nil
+	}
+
+	txn.ActualGateway = txn.GatewayID
+	switch resp.Status {
+	case ports.GatewayPaymentStatusSucceeded:
+		if err := transaction.TransitionState(txn, transaction.StatusCaptured, transaction.ActorGateway); err != nil {
+			return nil, err
+		}
+	case ports.GatewayPaymentStatusFailed:
+		if err := transaction.TransitionState(txn, transaction.StatusFailed, transaction.ActorGateway); err != nil {
+			return nil, err
+		}
+		txn.FailureReason = &transaction.FailureReason{
+			Category:       "gateway_declined",
+			Code:           resp.ErrorCode,
+			GatewayCode:    resp.ErrorCode,
+			GatewayMessage: resp.ErrorMessage,
+			Source:         transaction.FailureReasonSourceGateway,
+		}
+	default:
+		if err := transaction.TransitionState(txn, transaction.StatusFailed, transaction.ActorGateway); err != nil {
+			return nil, err
+		}
+	}
+	txn.ProcessingStartedAt = nil
+	txn.ProcessingTimeout = nil
+	if err := s.repo.UpdateStatus(ctx, txn); err != nil {
+		return nil, fmt.Errorf("payment: update status %s: %w", transactionID, err)
+	}
+	return txn, nil
+}
+
+func (s *Service) Settle(ctx context.Context, transactionID uuid.UUID) (*transaction.Txn, error) {
+	txn, err := s.repo.GetByID(ctx, transactionID)
+	if err != nil {
+		return nil, fmt.Errorf("payment: load transaction %s: %w", transactionID, err)
+	}
+	if err := transaction.TransitionState(txn, transaction.StatusSettled, transaction.ActorSystem); err != nil {
+		return nil, ErrInvalidTransition
+	}
+	if err := s.repo.UpdateStatus(ctx, txn); err != nil {
+		return nil, fmt.Errorf("payment: update status %s: %w", transactionID, err)
+	}
+	return txn, nil
 }
 
 

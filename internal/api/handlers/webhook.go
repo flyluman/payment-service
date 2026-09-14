@@ -26,6 +26,11 @@ type WebhookTransactionGetter interface {
 }
 type WebhookTenantConfigGetter interface {
 	Get(ctx context.Context, tenantID uuid.UUID, gatewayID string) (*gateway.TenantGatewayConfig, error)
+	ListByGateway(ctx context.Context, gatewayID string) ([]*gateway.TenantGatewayConfig, error)
+}
+
+type DisputeIngestor interface {
+	IngestGatewayDispute(ctx context.Context, gatewayID string, ev ports.GatewayDisputeEvent) error
 }
 
 type WebhookHandler struct {
@@ -33,11 +38,12 @@ type WebhookHandler struct {
 	parsers   WebhookParserResolver
 	txns      WebhookTransactionGetter
 	tenants   WebhookTenantConfigGetter
+	disputes  DisputeIngestor
 	log       ports.Logger
 }
 
-func NewWebhookHandler(processor WebhookProcessor, parsers WebhookParserResolver, txns WebhookTransactionGetter, tenants WebhookTenantConfigGetter, log ports.Logger) *WebhookHandler {
-	return &WebhookHandler{processor: processor, parsers: parsers, txns: txns, tenants: tenants, log: log}
+func NewWebhookHandler(processor WebhookProcessor, parsers WebhookParserResolver, txns WebhookTransactionGetter, tenants WebhookTenantConfigGetter, disputes DisputeIngestor, log ports.Logger) *WebhookHandler {
+	return &WebhookHandler{processor: processor, parsers: parsers, txns: txns, tenants: tenants, disputes: disputes, log: log}
 }
 
 func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -49,23 +55,36 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	gatewayID := r.PathValue("gateway_id")
 
 	txnIDStr := r.URL.Query().Get("transaction_id")
-	if txnIDStr == "" {
-		writeError(w, r, http.StatusBadRequest, "missing_transaction_id", "transaction_id query parameter is required")
-		return
-	}
-	txnID, err := uuid.Parse(txnIDStr)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid_transaction_id", "transaction_id must be a valid UUID")
-		return
-	}
-
-	txn, err := h.txns.GetByID(r.Context(), txnID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "transaction_not_found", "transaction not found")
-		return
+	var txnID uuid.UUID
+	if txnIDStr != "" {
+		var err error
+		txnID, err = uuid.Parse(txnIDStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid_transaction_id", "transaction_id must be a valid UUID")
+			return
+		}
 	}
 
-	rawCfg, err := h.tenants.Get(r.Context(), txn.TenantID, gatewayID)
+	var txn *transaction.Txn
+	var tenantID uuid.UUID
+	if txnIDStr != "" {
+		var err error
+		txn, err = h.txns.GetByID(r.Context(), txnID)
+		if err != nil {
+			writeError(w, r, http.StatusNotFound, "transaction_not_found", "transaction not found")
+			return
+		}
+		tenantID = txn.TenantID
+	} else {
+		tcfg, err := h.tenants.ListByGateway(r.Context(), gatewayID)
+		if err != nil || len(tcfg) == 0 {
+			writeError(w, r, http.StatusUnauthorized, "unknown_tenant", "no tenant config for gateway")
+			return
+		}
+		tenantID = tcfg[0].TenantID
+	}
+
+	rawCfg, err := h.tenants.Get(r.Context(), tenantID, gatewayID)
 	if err != nil {
 		log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{ports.FieldGatewayID: gatewayID, "reason": "tenant_config_not_found"})
 		writeError(w, r, http.StatusUnauthorized, "unknown_tenant", "no tenant config for gateway")
@@ -106,6 +125,20 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ev.Dispute != nil {
+		if h.disputes == nil {
+			writeError(w, r, http.StatusNotImplemented, "dispute_not_supported", "dispute webhooks not configured")
+			return
+		}
+		if err := h.disputes.IngestGatewayDispute(r.Context(), gatewayID, *ev.Dispute); err != nil {
+			log.Warn(ports.LogEventWebhookInboundInvalid, map[string]any{ports.FieldGatewayID: gatewayID, "reason": "dispute_ingest_failed"})
+			writeError(w, r, http.StatusInternalServerError, "dispute_ingest_failed", "could not process dispute webhook")
+			return
+		}
+		writeJSON(w, r, http.StatusOK, map[string]any{"accepted": true})
+		return
+	}
+
 	outcome, err := h.processor.Process(r.Context(), gatewayID, appwebhook.Event{
 		EventID:            ev.EventID,
 		GatewayReferenceID: ev.GatewayReferenceID,
@@ -135,6 +168,8 @@ func normalizeStatus(s ports.GatewayPaymentStatus) string {
 	switch s {
 	case ports.GatewayPaymentStatusSucceeded:
 		return "succeeded"
+	case ports.GatewayPaymentStatusAuthorized:
+		return "authorized"
 	case ports.GatewayPaymentStatusFailed:
 		return "failed"
 	case ports.GatewayPaymentStatusCancelled:

@@ -170,6 +170,13 @@ func (a *Adapter) Cancel(ctx context.Context, req ports.GatewayCancelRequest) (*
 	return &ports.GatewayCancelResponse{Status: status}, nil
 }
 
+func (a *Adapter) CapturePayment(ctx context.Context, req ports.GatewayCaptureRequest) (*ports.GatewayCaptureResponse, error) {
+	return nil, &ports.GatewayError{
+		Category: ports.ErrorCategoryGatewayError, Code: "not_implemented",
+		GatewayMessage: "manual capture not yet implemented",
+	}
+}
+
 func (a *Adapter) resolveForTxn(ctx context.Context, txnID uuid.UUID) (*TenantConfig, error) {
 	v, ok := a.txnTenants.Load(txnID)
 	if !ok {

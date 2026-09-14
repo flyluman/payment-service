@@ -27,7 +27,7 @@ func TestHandle_EmptyCallbackURL(t *testing.T) {
 	d := NewDispatcher(&http.Client{}, noopLog{})
 	payload, _ := json.Marshal(eventPayload{
 		TransactionID: uuid.NewString(),
-		Status:        "SUCCEEDED",
+		Status:        "CAPTURED",
 		CallbackURL:   "",
 	})
 
@@ -62,7 +62,7 @@ func TestHandle_Success(t *testing.T) {
 	d := NewDispatcher(srv.Client(), noopLog{})
 	payload, _ := json.Marshal(eventPayload{
 		TransactionID: uuid.NewString(),
-		Status:        "SUCCEEDED",
+		Status:        "CAPTURED",
 		CallbackURL:   srv.URL,
 	})
 
@@ -76,8 +76,8 @@ func TestHandle_Success(t *testing.T) {
 	if body["transaction_id"] == "" {
 		t.Fatal("expected transaction_id in body")
 	}
-	if body["status"] != "SUCCEEDED" {
-		t.Fatalf("expected status SUCCEEDED, got %s", body["status"])
+	if body["status"] != "CAPTURED" {
+		t.Fatalf("expected status CAPTURED, got %s", body["status"])
 	}
 }
 
@@ -104,7 +104,7 @@ func TestHandle_ConnectionRefused(t *testing.T) {
 	d := NewDispatcher(&http.Client{}, noopLog{})
 	payload, _ := json.Marshal(eventPayload{
 		TransactionID: uuid.NewString(),
-		Status:        "SUCCEEDED",
+		Status:        "CAPTURED",
 		CallbackURL:   "http://127.0.0.1:1",
 	})
 

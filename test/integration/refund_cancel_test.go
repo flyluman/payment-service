@@ -7,32 +7,35 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
 
-	"net/http"
-	"net/http/httptest"
-
 	"github.com/crownroutes/payment-service/internal/adapters/gateways"
-	"github.com/crownroutes/payment-service/internal/adapters/gateways/stripe"
 	"github.com/crownroutes/payment-service/internal/adapters/observability"
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	appcancel "github.com/crownroutes/payment-service/internal/app/cancel"
 	apprefund "github.com/crownroutes/payment-service/internal/app/refund"
 	domainrefund "github.com/crownroutes/payment-service/internal/domain/refund"
-	"github.com/crownroutes/payment-service/internal/domain/payment"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	"github.com/crownroutes/payment-service/internal/ports"
 	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
+func discardLogger() *observability.SlogLogger {
+	return observability.NewSlogLoggerFromHandler(slog.NewJSONHandler(io.Discard, nil))
+}
+
 func refundService(pg *testsupport.PG, registry apprefund.GatewayRegistry) *apprefund.Service {
 	return apprefund.NewService(
-		postgres.NewPaymentRepository(pg.DB, pg.Q),
-		postgres.NewRefundRepository(pg.DB, pg.Q),
-		postgres.NewOutboxWriter(pg.DB, pg.Q),
+		postgres.NewTransactionRepository(pg.DB),
+		postgres.NewRefundRepository(pg.DB),
+		postgres.NewOutboxWriter(pg.DB),
 		postgres.NewTransactor(pg.DB),
 		registry,
 		discardLogger(),
@@ -40,24 +43,22 @@ func refundService(pg *testsupport.PG, registry apprefund.GatewayRegistry) *appr
 	)
 }
 
-func seedTransaction(t *testing.T, pg *testsupport.PG, status payment.Status, amount int64) *payment.Payment {
+func seedTransaction(t *testing.T, pg *testsupport.PG, status transaction.Status, amount int64, gatewayID, reference string) *transaction.Txn {
 	t.Helper()
-	repo := postgres.NewPaymentRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 
-	txn, err := payment.New(uuid.New(), amount, "BDT", payment.PaymentMethodCard, "stripe", uuid.New(), "b@e.com", "o", nil, 30)
+	txn, err := transaction.New(uuid.New(), uuid.New(), amount, "BDT", transaction.PaymentMethodCard, gatewayID, uuid.New(), "b@e.com", "o", nil, 30, transaction.CaptureModeAuto)
 	if err != nil {
 		t.Fatal(err)
 	}
 	txn.Status = status
+	txn.AttemptedGateway = gatewayID
+	txn.GatewayReferenceID = reference
 	if err := tr.WithinTx(context.Background(), func(ctx context.Context) error { return repo.Insert(ctx, txn) }); err != nil {
 		t.Fatalf("seed transaction: %v", err)
 	}
 	return txn
-}
-
-func discardLogger() *observability.SlogLogger {
-	return observability.NewSlogLoggerFromHandler(slog.NewJSONHandler(io.Discard, nil))
 }
 
 func TestRefund_ConcurrentNoOverRefund(t *testing.T) {
@@ -65,12 +66,12 @@ func TestRefund_ConcurrentNoOverRefund(t *testing.T) {
 	pg.Truncate(t, "transactions", "refunds", "outbox_events")
 	ctx := context.Background()
 
-	parent := seedTransaction(t, pg, payment.StatusSucceeded, 100000)
+	parent := seedTransaction(t, pg, transaction.StatusCaptured, 100000, "stripe", "")
 
 	svc := refundService(pg, gateways.NewRegistry())
 
 	const goroutines = 8
-	var success, overRefund int64
+	var success, blocked int64
 	var wg sync.WaitGroup
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
@@ -84,7 +85,9 @@ func TestRefund_ConcurrentNoOverRefund(t *testing.T) {
 			case err == nil:
 				atomic.AddInt64(&success, 1)
 			case errors.As(err, &over):
-				atomic.AddInt64(&overRefund, 1)
+				atomic.AddInt64(&blocked, 1)
+			case errors.Is(err, postgres.ErrVersionConflict):
+				atomic.AddInt64(&blocked, 1)
 			default:
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -94,7 +97,7 @@ func TestRefund_ConcurrentNoOverRefund(t *testing.T) {
 
 	// 60000 each against a 100000 original: only one can succeed.
 	if success != 1 {
-		t.Errorf("expected exactly 1 successful refund, got %d (over_refund_blocked=%d)", success, overRefund)
+		t.Errorf("expected exactly 1 successful refund, got %d (blocked=%d)", success, blocked)
 	}
 
 	var total int64
@@ -113,16 +116,21 @@ func TestRefund_FullFlowEndToEnd(t *testing.T) {
 	pg.Truncate(t, "transactions", "refunds", "outbox_events")
 	ctx := context.Background()
 
-	parent := seedTransaction(t, pg, payment.StatusSucceeded, 100000)
-	parent.GatewayReferenceID = "pi_ref"
+	parent := seedTransaction(t, pg, transaction.StatusCaptured, 100000, "stripe", "pi_ref")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"re_1","status":"succeeded","amount":40000,"currency":"bdt"}`))
+		if strings.Contains(r.URL.Path, "/refunds") {
+			_, _ = w.Write([]byte(`{"id":"re_1","status":"succeeded","amount":40000,"currency":"bdt"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"pi_ref","status":"succeeded","amount":100000,"currency":"bdt"}`))
 	}))
 	defer srv.Close()
 
+	adapter := stripeAdapter(srv.URL)
+	warmAdapter(t, adapter, parent)
 	registry := gateways.NewRegistry()
-	registry.Register("stripe", stripe.New(stripe.Config{APIKey: "sk_test", BaseURL: srv.URL}))
+	registry.Register("stripe", adapter)
 	svc := refundService(pg, registry)
 
 	initiatedRes, err := svc.InitiateRefund(ctx, apprefund.InitiateInput{
@@ -144,7 +152,7 @@ func TestRefund_FullFlowEndToEnd(t *testing.T) {
 		t.Errorf("expected gateway refund id re_1, got %q", processed.GatewayRefundID)
 	}
 
-	reloaded, err := postgres.NewRefundRepository(pg.DB, pg.Q).GetByID(ctx, initiated.ID)
+	reloaded, err := postgres.NewRefundRepository(pg.DB).GetByID(ctx, initiated.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,8 +160,16 @@ func TestRefund_FullFlowEndToEnd(t *testing.T) {
 		t.Errorf("persisted refund should be REFUNDED with ResolvedAt, got %s / %v", reloaded.Status, reloaded.ResolvedAt)
 	}
 
+	parentAfter, err := postgres.NewTransactionRepository(pg.DB).GetByID(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentAfter.Status != transaction.StatusPartiallyRefunded {
+		t.Errorf("parent should be PARTIALLY_REFUNDED after a partial refund, got %s", parentAfter.Status)
+	}
+
 	var refundEvents int
-	events, perr := postgres.NewOutboxWriter(pg.DB, pg.Q).PollPending(ctx, testsupport.AllShards(), 10)
+	events, perr := postgres.NewOutboxWriter(pg.DB).PollPending(ctx, testsupport.AllShards(), 10)
 	if perr != nil {
 		t.Fatalf("poll outbox: %v", perr)
 	}
@@ -172,8 +188,8 @@ func TestCancel_ConcurrentSingleIntent(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	txn := seedTransaction(t, pg, payment.StatusProcessing, 150000)
-	repo := postgres.NewPaymentRepository(pg.DB, pg.Q)
+	txn := seedTransaction(t, pg, transaction.StatusProcessing, 150000, "stripe", "")
+	repo := postgres.NewTransactionRepository(pg.DB)
 
 	const goroutines = 16
 	var winners int64
@@ -182,7 +198,7 @@ func TestCancel_ConcurrentSingleIntent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok, err := repo.SetCancelIntent(ctx, txn.ID, payment.ActorTenant, payment.CancelViaAPI)
+			ok, err := repo.SetCancelIntent(ctx, txn.ID, transaction.ActorTenant, transaction.CancelViaAPI)
 			if err != nil {
 				t.Errorf("set cancel intent: %v", err)
 				return
@@ -204,10 +220,10 @@ func TestCancelService_Outcomes(t *testing.T) {
 	pg.Truncate(t, "transactions")
 	ctx := context.Background()
 
-	svc := appcancel.NewService(postgres.NewPaymentRepository(pg.DB, pg.Q), discardLogger(), observability.NewNoopMetrics())
+	svc := appcancel.NewService(postgres.NewTransactionRepository(pg.DB), discardLogger(), observability.NewNoopMetrics())
 
-	processing := seedTransaction(t, pg, payment.StatusProcessing, 1000)
-	res, err := svc.Cancel(ctx, appcancel.CancelInput{TransactionID: processing.ID, By: payment.ActorOps, Via: payment.CancelViaOpsTool})
+	processing := seedTransaction(t, pg, transaction.StatusProcessing, 1000, "stripe", "")
+	res, err := svc.Cancel(ctx, appcancel.CancelInput{TransactionID: processing.ID, By: transaction.ActorOps, Via: transaction.CancelViaOpsTool})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,12 +231,12 @@ func TestCancelService_Outcomes(t *testing.T) {
 		t.Errorf("PROCESSING cancel should be CANCEL_REQUESTED, got %s", res.Outcome)
 	}
 
-	terminal := seedTransaction(t, pg, payment.StatusSucceeded, 1000)
-	res, err = svc.Cancel(ctx, appcancel.CancelInput{TransactionID: terminal.ID, By: payment.ActorOps, Via: payment.CancelViaOpsTool})
+	terminal := seedTransaction(t, pg, transaction.StatusCaptured, 1000, "stripe", "")
+	res, err = svc.Cancel(ctx, appcancel.CancelInput{TransactionID: terminal.ID, By: transaction.ActorOps, Via: transaction.CancelViaOpsTool})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Outcome != appcancel.OutcomeAlreadyTerminal {
-		t.Errorf("SUCCEEDED cancel should be ALREADY_TERMINAL, got %s", res.Outcome)
+		t.Errorf("CAPTURED cancel should be ALREADY_TERMINAL, got %s", res.Outcome)
 	}
 }

@@ -65,7 +65,7 @@ func (noopMetrics) Histogram(string, float64, map[string]string) {}
 func (noopMetrics) Gauge(string, float64, map[string]string)     {}
 
 func processingTxn() *transaction.Txn {
-	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "razorpay", uuid.New(), "b@e.com", "o", nil, 30)
+	t, _ := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, "razorpay", uuid.New(), "b@e.com", "o", nil, 30, transaction.CaptureModeAuto)
 	t.Status = transaction.StatusProcessing
 	t.GatewayReferenceID = "order_1"
 	return t
@@ -82,13 +82,13 @@ func TestProcess_ResolvesProcessingToSucceeded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !out.Resolved || out.Status != transaction.StatusSucceeded {
-		t.Errorf("expected resolved to SUCCEEDED, got %+v", out)
+	if !out.Resolved || out.Status != transaction.StatusCaptured {
+		t.Errorf("expected resolved to CAPTURED, got %+v", out)
 	}
 	if txns.updates != 1 || len(outbox.events) != 1 || webhooks.rawCount != 1 {
 		t.Errorf("expected update+event+raw metadata, got updates=%d events=%d raw=%d", txns.updates, len(outbox.events), webhooks.rawCount)
 	}
-	if outbox.events[0].EventType != ports.EventTypeTransactionSucceeded {
+	if outbox.events[0].EventType != ports.EventTypeTransactionCaptured {
 		t.Errorf("expected PAYMENT_SUCCEEDED, got %s", outbox.events[0].EventType)
 	}
 }

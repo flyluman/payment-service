@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/crownroutes/payment-service/internal/domain/notification"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
@@ -50,14 +51,16 @@ type Transactor interface {
 }
 
 type Service struct {
-	txns     TransactionRepository
-	webhooks WebhookRepo
-	outbox   EventWriter
-	tx       Transactor
-	audit    ports.AuditLogStore
-	log      ports.Logger
-	metrics  ports.MetricRecorder
-	bus      ports.EventBus
+	txns         TransactionRepository
+	webhooks     WebhookRepo
+	outbox       EventWriter
+	tx           Transactor
+	audit        ports.AuditLogStore
+	notif        ports.NotificationDispatcher
+	twDispatcher ports.TenantWebhookDispatcher
+	log          ports.Logger
+	metrics      ports.MetricRecorder
+	bus          ports.EventBus
 }
 
 func NewService(txns TransactionRepository, webhooks WebhookRepo, outbox EventWriter, tx Transactor, log ports.Logger, metrics ports.MetricRecorder) *Service {
@@ -66,6 +69,8 @@ func NewService(txns TransactionRepository, webhooks WebhookRepo, outbox EventWr
 
 func (s *Service) SetEventBus(bus ports.EventBus) { s.bus = bus }
 func (s *Service) SetAuditLogStore(a ports.AuditLogStore) { s.audit = a }
+func (s *Service) SetNotificationService(n ports.NotificationDispatcher) { s.notif = n }
+func (s *Service) SetTenantWebhookDispatcher(d ports.TenantWebhookDispatcher) { s.twDispatcher = d }
 
 type webhookEventPayload struct {
 	TransactionID    string `json:"transaction_id"`
@@ -159,6 +164,9 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 			}
 		}
 
+		s.dispatchTerminalNotification(ctx, txn, newStatus)
+		s.dispatchTenantWebhook(ctx, txn, newStatus)
+
 		outcome.Resolved = true
 		outcome.Status = newStatus
 		outcome.TransactionID = txn.ID
@@ -188,8 +196,11 @@ func (s *Service) Process(ctx context.Context, gatewayID string, ev Event, rawPa
 
 func (s *Service) buildEvent(txn *transaction.Txn, status transaction.Status, gatewayID string) (ports.OutboxEvent, error) {
 	eventType := ports.EventTypeTransactionFailed
-	if status == transaction.StatusSucceeded {
-		eventType = ports.EventTypeTransactionSucceeded
+	switch status {
+	case transaction.StatusCaptured:
+		eventType = ports.EventTypeTransactionCaptured
+	case transaction.StatusCancelled:
+		eventType = ports.EventTypeTransactionCancelled
 	}
 	payload, err := json.Marshal(webhookEventPayload{
 		TransactionID:    txn.ID.String(),
@@ -214,10 +225,84 @@ func (s *Service) buildEvent(txn *transaction.Txn, status transaction.Status, ga
 func mapWebhookStatus(s string) (transaction.Status, bool) {
 	switch s {
 	case "succeeded", "success", "captured", "paid":
-		return transaction.StatusSucceeded, true
+		return transaction.StatusCaptured, true
+	case "authorized":
+		return transaction.StatusAuthorized, true
 	case "failed", "failure":
 		return transaction.StatusFailed, true
+	case "cancelled", "canceled":
+		return transaction.StatusCancelled, true
 	default:
 		return "", false
 	}
+}
+
+func (s *Service) dispatchTerminalNotification(ctx context.Context, txn *transaction.Txn, status transaction.Status) {
+	if s.notif == nil || txn.CustomerEmail == "" {
+		return
+	}
+
+	data := map[string]any{
+		"amount":         txn.Amount,
+		"currency":       txn.Currency,
+		"transaction_id": txn.ID.String(),
+	}
+
+	switch status {
+	case transaction.StatusCaptured:
+		s.notif.Dispatch(ctx, &notification.Notification{
+			TenantID:     txn.TenantID,
+			UserID:       &txn.UserID,
+			Type:         notification.PaymentSuccess,
+			Channel:      notification.ChannelEmail,
+			Recipient:    txn.CustomerEmail,
+			TemplateName: "PAYMENT_SUCCESS",
+			TemplateData: data,
+		})
+	case transaction.StatusFailed:
+		reason := ""
+		if txn.FailureReason != nil {
+			reason = txn.FailureReason.GatewayMessage
+		}
+		data["reason"] = reason
+		s.notif.Dispatch(ctx, &notification.Notification{
+			TenantID:     txn.TenantID,
+			UserID:       &txn.UserID,
+			Type:         notification.PaymentFailure,
+			Channel:      notification.ChannelEmail,
+			Recipient:    txn.CustomerEmail,
+			TemplateName: "PAYMENT_FAILURE",
+			TemplateData: data,
+		})
+	}
+}
+
+func (s *Service) dispatchTenantWebhook(ctx context.Context, txn *transaction.Txn, status transaction.Status) {
+	if s.twDispatcher == nil {
+		return
+	}
+
+	var eventType string
+	switch status {
+	case transaction.StatusCaptured:
+		eventType = ports.EventTypeTransactionCaptured
+	case transaction.StatusFailed:
+		eventType = ports.EventTypeTransactionFailed
+	case transaction.StatusCancelled:
+		eventType = ports.EventTypeTransactionCancelled
+	default:
+		return
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"transaction_id": txn.ID.String(),
+		"status":         string(status),
+		"amount":         txn.Amount,
+		"currency":       txn.Currency,
+	})
+	if err != nil {
+		return
+	}
+
+	_ = s.twDispatcher.Dispatch(ctx, txn.TenantID, txn.ID, eventType, payload)
 }

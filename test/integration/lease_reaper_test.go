@@ -11,22 +11,23 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/crownroutes/payment-service/internal/adapters/gateways"
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
-	"github.com/crownroutes/payment-service/internal/domain/payment"
+	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	leaseexpiry "github.com/crownroutes/payment-service/internal/jobs/lease_expiry"
 	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
-func seedStuckTxn(t *testing.T, pg *testsupport.PG, gatewayID, reference string) *payment.Payment {
+func seedStuckTxn(t *testing.T, pg *testsupport.PG, gatewayID, reference string) *transaction.Txn {
 	t.Helper()
-	repo := postgres.NewPaymentRepository(pg.DB, pg.Q)
+	repo := postgres.NewTransactionRepository(pg.DB)
 	tr := postgres.NewTransactor(pg.DB)
 
-	txn, err := payment.New(uuid.New(), 150000, "BDT", payment.PaymentMethodCard, gatewayID, uuid.New(), "b@e.com", "o", nil, 30)
+	txn, err := transaction.New(uuid.New(), uuid.New(), 150000, "BDT", transaction.PaymentMethodCard, gatewayID, uuid.New(), "b@e.com", "o", nil, 30, transaction.CaptureModeAuto)
 	if err != nil {
 		t.Fatal(err)
 	}
-	txn.Status = payment.StatusProcessing
+	txn.Status = transaction.StatusProcessing
 	txn.AttemptedGateway = gatewayID
 	txn.ActualGateway = gatewayID
 	txn.GatewayReferenceID = reference
@@ -46,7 +47,7 @@ func TestLeaseReaper_RecoversStuckTransactionViaStatusCheck(t *testing.T) {
 	testsupport.SeedStripeCardGateway(t, pg)
 	ctx := context.Background()
 
-	// The gateway reports the payment actually SUCCEEDED while we were stuck.
+	// The gateway reports the payment actually succeeded while we were stuck.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"pi_stuck","status":"succeeded","amount":150000,"currency":"bdt"}`))
 	}))
@@ -54,11 +55,16 @@ func TestLeaseReaper_RecoversStuckTransactionViaStatusCheck(t *testing.T) {
 
 	stuck := seedStuckTxn(t, pg, "stripe", "pi_stuck")
 
-	svc := buildService(pg, srv.URL)
+	adapter := stripeAdapter(srv.URL)
+	warmAdapter(t, adapter, stuck)
+	registry := gateways.NewRegistry()
+	registry.Register("stripe", adapter)
+	svc := buildService(pg, registry)
+
 	reaper := leaseexpiry.New(
-		postgres.NewPaymentRepository(pg.DB, pg.Q),
+		postgres.NewTransactionRepository(pg.DB),
 		svc,
-		postgres.NewIdempotencyRepository(pg.DB, pg.Q),
+		postgres.NewIdempotencyRepository(pg.DB),
 		discardLogger(),
 		leaseexpiry.Config{IdempotencyProcessingTimeout: time.Minute},
 	)
@@ -67,12 +73,12 @@ func TestLeaseReaper_RecoversStuckTransactionViaStatusCheck(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	persisted, err := postgres.NewPaymentRepository(pg.DB, pg.Q).GetByID(ctx, stuck.ID)
+	persisted, err := postgres.NewTransactionRepository(pg.DB).GetByID(ctx, stuck.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.Status != payment.StatusSucceeded {
-		t.Errorf("expected the stuck PROCESSING txn reconciled to SUCCEEDED, got %s", persisted.Status)
+	if persisted.Status != transaction.StatusCaptured {
+		t.Errorf("expected the stuck PROCESSING txn reconciled to CAPTURED, got %s", persisted.Status)
 	}
 
 	var events int
@@ -103,10 +109,12 @@ func TestLeaseReaper_SweepsStaleIdempotencyKeysOnly(t *testing.T) {
 	insert("expired-completed", "COMPLETED", 25*time.Hour, -time.Hour)     // past TTL -> purged
 	insert("live-completed", "COMPLETED", time.Hour, 23*time.Hour)         // valid replay cache -> kept
 
+	registry := gateways.NewRegistry()
+	registry.Register("stripe", stripeAdapter("http://unused"))
 	reaper := leaseexpiry.New(
-		postgres.NewPaymentRepository(pg.DB, pg.Q),
-		buildService(pg, "http://unused"),
-		postgres.NewIdempotencyRepository(pg.DB, pg.Q),
+		postgres.NewTransactionRepository(pg.DB),
+		buildService(pg, registry),
+		postgres.NewIdempotencyRepository(pg.DB),
 		discardLogger(),
 		leaseexpiry.Config{IdempotencyProcessingTimeout: 5 * time.Minute},
 	)

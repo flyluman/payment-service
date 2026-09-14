@@ -16,13 +16,18 @@ func (e ErrInvalidTransition) Error() string {
 }
 
 var transitionTable = map[Status][]Status{
-	StatusPending:      {StatusProcessing, StatusCancelled, StatusFailed},
-	StatusProcessing:   {StatusSucceeded, StatusFailed},
-	StatusSucceeded:    {StatusRefunded, StatusRefundFailed},
-	StatusFailed:       {StatusCancelled},
-	StatusRefundFailed: {StatusRefunded},
-	StatusCancelled:    {},
-	StatusRefunded:     {},
+	StatusPending:           {StatusProcessing, StatusAuthorized, StatusCaptured, StatusFailed, StatusCancelled},
+	StatusProcessing:        {StatusCaptured, StatusAuthorized, StatusFailed},
+	StatusAuthorized:        {StatusCaptured, StatusFailed, StatusCancelled},
+	StatusCaptured:          {StatusSettled, StatusRefundPending, StatusRefunded, StatusRefundFailed, StatusDisputed},
+	StatusSettled:           {StatusRefundPending, StatusRefunded, StatusRefundFailed, StatusDisputed},
+	StatusFailed:            {StatusCancelled},
+	StatusRefundPending:     {StatusRefunded, StatusRefundFailed, StatusPartiallyRefunded},
+	StatusPartiallyRefunded: {StatusRefundPending, StatusRefunded, StatusRefundFailed},
+	StatusRefunded:          {},
+	StatusRefundFailed:      {StatusRefundPending},
+	StatusDisputed:          {StatusCaptured, StatusRefunded},
+	StatusCancelled:         {},
 }
 
 func isValidTransition(from, to Status) bool {
@@ -40,7 +45,7 @@ func isValidTransition(from, to Status) bool {
 
 func applyTransitionEffects(tx *Txn, from, to Status, now time.Time) {
 	switch {
-	case to == StatusFailed || to == StatusCancelled || to == StatusSucceeded:
+	case to == StatusFailed || to == StatusCancelled || to == StatusCaptured || to == StatusSettled:
 		if from == StatusProcessing {
 			tx.ProcessingStartedAt = nil
 			tx.ProcessingTimeout = nil
@@ -84,11 +89,16 @@ func AllStatuses() []Status {
 	all := []Status{
 		StatusPending,
 		StatusProcessing,
-		StatusSucceeded,
+		StatusAuthorized,
+		StatusCaptured,
+		StatusSettled,
 		StatusFailed,
 		StatusCancelled,
+		StatusRefundPending,
+		StatusPartiallyRefunded,
 		StatusRefunded,
 		StatusRefundFailed,
+		StatusDisputed,
 	}
 	out := make([]Status, len(all))
 	copy(out, all)

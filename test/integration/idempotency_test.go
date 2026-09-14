@@ -4,23 +4,33 @@ package integration
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/crownroutes/payment-service/internal/adapters/gateways"
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	"github.com/crownroutes/payment-service/internal/app/idempotency"
-	"github.com/crownroutes/payment-service/internal/app/payment"
+	apppayment "github.com/crownroutes/payment-service/internal/app/payment"
 	"github.com/crownroutes/payment-service/internal/testsupport"
 )
 
 // idempotentService wires the service-owned idempotency guard and NO HTTP cache
 // middleware — this is the "cache disabled" configuration, proving the service
 // is the sole authority for every idempotency outcome.
-func idempotentService(pg *testsupport.PG) *payment.Service {
-	svc := buildService(pg, "http://unused")
+func idempotentService(t *testing.T, pg *testsupport.PG) *apppayment.Service {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"pi_idem","status":"succeeded","amount":150000,"currency":"bdt"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	registry := gateways.NewRegistry()
+	registry.Register("stripe", stripeAdapter(srv.URL))
+	svc := buildService(pg, registry)
 	svc.SetIdempotency(idempotency.NewGuard(
-		postgres.NewIdempotencyRepository(pg.DB, pg.Q),
+		postgres.NewIdempotencyRepository(pg.DB),
 		postgres.NewTransactor(pg.DB),
 	))
 	return svc
@@ -32,7 +42,7 @@ func TestServiceIdempotency_ConcurrentSingleExecution(t *testing.T) {
 	testsupport.SeedStripeCardGateway(t, pg)
 	ctx := context.Background()
 
-	svc := idempotentService(pg)
+	svc := idempotentService(t, pg)
 	in := cardInput()
 	in.IdempotencyKey = "concurrent-key"
 
@@ -43,9 +53,9 @@ func TestServiceIdempotency_ConcurrentSingleExecution(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := svc.Checkout(ctx, in)
+			res, err := svc.Create(ctx, in)
 			if err != nil {
-				t.Errorf("Checkout: %v", err)
+				t.Errorf("Create: %v", err)
 				return
 			}
 			switch res.Verdict {
@@ -84,11 +94,11 @@ func TestServiceIdempotency_SequentialReplayReturnsSameTransaction(t *testing.T)
 	testsupport.SeedStripeCardGateway(t, pg)
 	ctx := context.Background()
 
-	svc := idempotentService(pg)
+	svc := idempotentService(t, pg)
 	in := cardInput()
 	in.IdempotencyKey = "seq-key"
 
-	first, err := svc.Checkout(ctx, in)
+	first, err := svc.Create(ctx, in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +106,7 @@ func TestServiceIdempotency_SequentialReplayReturnsSameTransaction(t *testing.T)
 		t.Fatalf("first call should be Created, got %v", first.Verdict)
 	}
 
-	second, err := svc.Checkout(ctx, in)
+	second, err := svc.Create(ctx, in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,17 +132,17 @@ func TestServiceIdempotency_KeyReusedWithDifferentBody(t *testing.T) {
 	testsupport.SeedStripeCardGateway(t, pg)
 	ctx := context.Background()
 
-	svc := idempotentService(pg)
+	svc := idempotentService(t, pg)
 	in := cardInput()
 	in.IdempotencyKey = "reuse-key"
 
-	if _, err := svc.Checkout(ctx, in); err != nil {
+	if _, err := svc.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
 
 	reused := in
 	reused.Amount = in.Amount + 1 // same key, different canonical body
-	res, err := svc.Checkout(ctx, reused)
+	res, err := svc.Create(ctx, reused)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -128,7 +128,7 @@ const sse = new EventSource(
 sse.addEventListener('status', (e) => {
   const { status } = JSON.parse(e.data);
 
-  if (status === 'SUCCEEDED') {
+  if (status === 'CAPTURED') {
     window.location.href = redirectUrl;
   } else if (status === 'FAILED' || status === 'CANCELLED') {
     showError('Payment failed');
@@ -152,7 +152,7 @@ const interval = setInterval(async () => {
   );
   const { data } = await res.json();
 
-  if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(data.status)) {
+  if (['CAPTURED', 'FAILED', 'CANCELLED'].includes(data.status)) {
     clearInterval(interval);
     handleStatus(data.status);
   }
@@ -162,7 +162,7 @@ const interval = setInterval(async () => {
 ## Checkout Token Rules
 
 - Single-use per transaction
-- Expires after payment finalizes (SUCCEEDED/FAILED/CANCELLED)
+- Expires after payment finalizes (CAPTURED/FAILED/CANCELLED)
 - Never expose in URLs that could be logged (use query params, not path)
 - Only works on `/pay/` and `/api/v1/payments/{id}` endpoints
 

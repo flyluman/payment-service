@@ -66,6 +66,18 @@ gateway:
   http_timeout_sec: 30
   circuit_breaker_threshold: 5
 
+notification:
+  smtp:
+    host: ""
+    port: 587
+    username: ""
+    password: ""
+    from: ""
+  sms:
+    provider: ""
+    api_key: ""
+    from: ""
+
 observability:
   backend: stdout
   log_level: debug

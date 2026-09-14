@@ -60,6 +60,30 @@ WHERE tenant_id = $1 AND is_active = true
 ORDER BY gateway_id`, tenantID)
 }
 
+func (s *TenantConfigStore) ListByGateway(ctx context.Context, gatewayID string) ([]*gateway.TenantGatewayConfig, error) {
+	rows, err := s.db.ReadPool().Query(ctx, `SELECT tenant_id, gateway_id, provider, encrypted_config, config_version, is_active, created_at, updated_at
+FROM tenant_gateway_configs
+WHERE gateway_id = $1
+ORDER BY tenant_id`, gatewayID)
+	if err != nil {
+		return nil, fmt.Errorf("tenant_config: list by gateway %s: %w", gatewayID, err)
+	}
+	defer rows.Close()
+
+	var configs []*gateway.TenantGatewayConfig
+	for rows.Next() {
+		cfg, err := scanTenantGatewayConfig(rows)
+		if err != nil {
+			return nil, fmt.Errorf("tenant_config: scan: %w", err)
+		}
+		if err := s.decryptConfig(ctx, cfg); err != nil {
+			return nil, err
+		}
+		configs = append(configs, cfg)
+	}
+	return configs, rows.Err()
+}
+
 func (s *TenantConfigStore) list(ctx context.Context, query string, tenantID uuid.UUID) ([]*gateway.TenantGatewayConfig, error) {
 	rows, err := s.db.ReadPool().Query(ctx, query, tenantID)
 	if err != nil {
@@ -99,6 +123,10 @@ func (s *TenantConfigStore) Upsert(ctx context.Context, cfg *gateway.TenantGatew
 	}
 
 	var version int
+	configVersion := cfg.ConfigVersion
+	if configVersion == 0 {
+		configVersion = 1
+	}
 	err := s.db.pool.QueryRow(ctx, `INSERT INTO tenant_gateway_configs (tenant_id, gateway_id, provider, encrypted_config, config_version, is_active, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, NOW())
 ON CONFLICT (tenant_id, gateway_id) DO UPDATE SET
@@ -109,7 +137,7 @@ ON CONFLICT (tenant_id, gateway_id) DO UPDATE SET
     updated_at = NOW()
 RETURNING config_version`,
 		cfg.TenantID, cfg.GatewayID, string(cfg.Provider),
-		encrypted, cfg.ConfigVersion, cfg.IsActive,
+		encrypted, configVersion, cfg.IsActive,
 	).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("tenant_config: upsert %s/%s: %w", cfg.TenantID, cfg.GatewayID, err)

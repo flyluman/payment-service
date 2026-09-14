@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,12 +16,24 @@ var (
 	ErrWebhookParse     = errors.New("gateway: webhook payload could not be parsed")
 )
 
+type GatewayDisputeEvent struct {
+	GatewayDisputeID  string
+	GatewayReferenceID string // payment_intent ID (pi_xxx)
+	Status            string // maps to dispute domain status
+	Reason            string
+	Amount            int64
+	Currency          string
+	EvidenceDueBy     *time.Time
+	ResolvedAt        *time.Time
+}
+
 type GatewayWebhookEvent struct {
 	EventID            string
 	GatewayReferenceID string
 	Status             GatewayPaymentStatus
 	EventType          string
-	GatewayMetadata        map[string]any
+	GatewayMetadata    map[string]any
+	Dispute            *GatewayDisputeEvent
 }
 
 type GatewayWebhookParser interface {
@@ -33,12 +46,13 @@ type GatewayCancelStatus string
 type ErrorCategory string
 
 const (
-	GatewayPaymentStatusPending    GatewayPaymentStatus = "PENDING"
-	GatewayPaymentStatusProcessing GatewayPaymentStatus = "PROCESSING"
-	GatewayPaymentStatusSucceeded  GatewayPaymentStatus = "SUCCEEDED"
-	GatewayPaymentStatusFailed     GatewayPaymentStatus = "FAILED"
-	GatewayPaymentStatusCancelled  GatewayPaymentStatus = "CANCELLED"
-	GatewayPaymentStatusAmbiguous  GatewayPaymentStatus = "AMBIGUOUS"
+	GatewayPaymentStatusPending     GatewayPaymentStatus = "PENDING"
+	GatewayPaymentStatusProcessing  GatewayPaymentStatus = "PROCESSING"
+	GatewayPaymentStatusAuthorized  GatewayPaymentStatus = "AUTHORIZED"
+	GatewayPaymentStatusSucceeded   GatewayPaymentStatus = "SUCCEEDED"
+	GatewayPaymentStatusFailed      GatewayPaymentStatus = "FAILED"
+	GatewayPaymentStatusCancelled   GatewayPaymentStatus = "CANCELLED"
+	GatewayPaymentStatusAmbiguous   GatewayPaymentStatus = "AMBIGUOUS"
 )
 const (
 	GatewayRefundStatusInitiated  GatewayRefundStatus = "INITIATED"
@@ -63,6 +77,7 @@ const (
 type GatewayCapabilities struct {
 	SupportsCancel          bool
 	SupportsPartialRefund   bool
+	SupportsManualCapture   bool
 	IdempotencyCapable      bool
 	SupportedPaymentMethods []transaction.PaymentMethod
 	SupportedCurrencies     []string
@@ -97,6 +112,21 @@ type GatewayCancelRequest struct {
 	TransactionID      uuid.UUID
 	GatewayReferenceID string
 	IdempotencyKey     string
+}
+type GatewayCaptureRequest struct {
+	TransactionID      uuid.UUID
+	GatewayReferenceID string
+	IdempotencyKey     string
+	Amount             int64
+	Currency           string
+}
+type GatewayCaptureResponse struct {
+	GatewayReferenceID string
+	Status             GatewayPaymentStatus
+	Amount             int64
+	Currency           string
+	ErrorCode          string
+	ErrorMessage       string
 }
 type GatewayCardResponse struct {
 	CardBrand string
@@ -157,6 +187,7 @@ type GatewayAdapter interface {
 	CheckStatus(ctx context.Context, req GatewayStatusRequest) (*GatewayPaymentResponse, error)
 	Refund(ctx context.Context, req GatewayRefundRequest) (*GatewayRefundResponse, error)
 	Cancel(ctx context.Context, req GatewayCancelRequest) (*GatewayCancelResponse, error)
+	CapturePayment(ctx context.Context, req GatewayCaptureRequest) (*GatewayCaptureResponse, error)
 	Capabilities() GatewayCapabilities
 }
 type GatewayError struct {

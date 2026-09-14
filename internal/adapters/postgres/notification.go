@@ -23,7 +23,11 @@ func (s *NotificationStore) Insert(ctx context.Context, n *notification.Notifica
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Pool().Exec(ctx, `
+	tx, err := txFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO notifications (id, tenant_id, user_id, notification_type, channel, recipient, template_name, template_data, status, attempts, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'PENDING', 0, NOW())
 	`, n.ID, n.TenantID, n.UserID, string(n.Type), string(n.Channel),

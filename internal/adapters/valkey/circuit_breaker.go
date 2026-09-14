@@ -121,16 +121,17 @@ func (s *CircuitBreakerStore) RecordSuccess(ctx context.Context, gatewayID strin
 
 func (s *CircuitBreakerStore) AcquireProbe(ctx context.Context, gatewayID string, ttl time.Duration) (bool, error) {
 	res := s.client.Do(ctx, s.client.B().Set().Key(probeKey(gatewayID)).Value("1").Nx().PxMilliseconds(ttl.Milliseconds()).Build())
-	ok, err := res.ToBool()
+	msg, err := res.ToMessage()
 	if err != nil {
-		// ToBool returns false,nil for nil reply (NX not set) — but also for
-		// genuine errors. Distinguish via the raw error.
-		if res.Error() != nil {
-			return false, fmt.Errorf("circuit_breaker: acquire probe %s: %w", gatewayID, res.Error())
+		if errors.Is(err, valkey.Nil) {
+			return false, nil
 		}
-		return false, nil
+		return false, fmt.Errorf("circuit_breaker: acquire probe %s: %w", gatewayID, err)
 	}
-	return ok, nil
+	if msg.IsBool() {
+		return msg.ToBool()
+	}
+	return true, nil
 }
 
 func (s *CircuitBreakerStore) SetLastKnownScore(ctx context.Context, gatewayID string, score int) error {

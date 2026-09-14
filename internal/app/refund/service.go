@@ -17,8 +17,17 @@ import (
 
 var ErrNotRefundable = errors.New("refund: transaction is not in a refundable state")
 
+func isRefundableStatus(s transaction.Status) bool {
+	switch s {
+	case transaction.StatusCaptured, transaction.StatusSettled, transaction.StatusPartiallyRefunded:
+		return true
+	}
+	return false
+}
+
 type TransactionReader interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*transaction.Txn, error)
+	UpdateStatus(ctx context.Context, t *transaction.Txn) error
 }
 
 type RefundRepo interface {
@@ -45,15 +54,18 @@ type GatewayRegistry interface {
 }
 
 type Service struct {
-	txns     TransactionReader
-	refunds  RefundRepo
-	outbox   EventWriter
-	tx       Transactor
-	gateways GatewayRegistry
-	idem     *idempotency.Guard
-	audit    ports.AuditLogStore
-	log      ports.Logger
-	metrics  ports.MetricRecorder
+	txns         TransactionReader
+	refunds      RefundRepo
+	outbox       EventWriter
+	tx           Transactor
+	gateways     GatewayRegistry
+	idem         *idempotency.Guard
+	audit        ports.AuditLogStore
+	notif        ports.NotificationDispatcher
+	twDispatcher ports.TenantWebhookDispatcher
+	log          ports.Logger
+	metrics      ports.MetricRecorder
+	bus          ports.EventBus
 }
 
 func NewService(txns TransactionReader, refunds RefundRepo, outbox EventWriter, tx Transactor, gateways GatewayRegistry, log ports.Logger, metrics ports.MetricRecorder) *Service {
@@ -62,6 +74,9 @@ func NewService(txns TransactionReader, refunds RefundRepo, outbox EventWriter, 
 
 func (s *Service) SetIdempotency(g *idempotency.Guard) { s.idem = g }
 func (s *Service) SetAuditLogStore(a ports.AuditLogStore) { s.audit = a }
+func (s *Service) SetEventBus(bus ports.EventBus) { s.bus = bus }
+func (s *Service) SetNotificationService(n ports.NotificationDispatcher) { s.notif = n }
+func (s *Service) SetTenantWebhookDispatcher(d ports.TenantWebhookDispatcher) { s.twDispatcher = d }
 
 type InitiateInput struct {
 	TransactionID  uuid.UUID
@@ -95,13 +110,19 @@ func (s *Service) InitiateRefund(ctx context.Context, in InitiateInput) (Initiat
 	if err != nil {
 		return InitiateResult{}, fmt.Errorf("refund: load transaction %s: %w", in.TransactionID, err)
 	}
-	if parent.Status != transaction.StatusSucceeded {
+	if !isRefundableStatus(parent.Status) {
 		return InitiateResult{}, ErrNotRefundable
 	}
 
 	if s.idem == nil {
 		var rf *refund.Refund
 		err := s.tx.WithinTx(ctx, func(ctx context.Context) error {
+			if err := transaction.TransitionState(parent, transaction.StatusRefundPending, transaction.ActorSystem); err != nil {
+				return err
+			}
+			if err := s.txns.UpdateStatus(ctx, parent); err != nil {
+				return err
+			}
 			r, err := s.insertRefund(ctx, in, parent)
 			if err != nil {
 				return err
@@ -126,6 +147,12 @@ func (s *Service) InitiateRefund(ctx context.Context, in InitiateInput) (Initiat
 
 	var created *refund.Refund
 	res, err := s.idem.Execute(ctx, composite, requestHash, func(ctx context.Context) ([]byte, error) {
+		if err := transaction.TransitionState(parent, transaction.StatusRefundPending, transaction.ActorSystem); err != nil {
+			return nil, err
+		}
+		if err := s.txns.UpdateStatus(ctx, parent); err != nil {
+			return nil, err
+		}
 		r, err := s.insertRefund(ctx, in, parent)
 		if err != nil {
 			return nil, err

@@ -12,8 +12,10 @@ import (
 	"github.com/crownroutes/payment-service/internal/adapters/postgres"
 	"github.com/crownroutes/payment-service/internal/adapters/observability"
 	"github.com/crownroutes/payment-service/internal/adapters/outbox"
+	refundinitiator "github.com/crownroutes/payment-service/internal/adapters/refundinitiator"
 	"github.com/crownroutes/payment-service/internal/adapters/sns"
 	"github.com/crownroutes/payment-service/internal/app/payment"
+	"github.com/crownroutes/payment-service/internal/app/refund"
 	"github.com/crownroutes/payment-service/internal/ports"
 	"github.com/crownroutes/payment-service/internal/relay"
 	"github.com/crownroutes/payment-service/internal/relay/publisher"
@@ -33,7 +35,7 @@ func startRelay(ctx context.Context, d *deps) error {
 	notifier.Start(ctx)
 	defer notifier.Close()
 
-	pub, err := buildPublisher(ctx, cfg, logger, d.paymentSvc)
+	pub, err := buildPublisher(ctx, cfg, logger, d.paymentSvc, d.refundSvc)
 	if err != nil {
 		return err
 	}
@@ -67,7 +69,7 @@ func startRelay(ctx context.Context, d *deps) error {
 	return nil
 }
 
-func buildPublisher(ctx context.Context, cfg *config.Config, logger *observability.SlogLogger, paymentSvc *payment.Service) (relay.Publisher, error) {
+func buildPublisher(ctx context.Context, cfg *config.Config, logger *observability.SlogLogger, paymentSvc *payment.Service, refundSvc *refund.Service) (relay.Publisher, error) {
 	var basePub relay.Publisher
 	switch cfg.Outbox.Publisher {
 	case "sns":
@@ -95,6 +97,7 @@ func buildPublisher(ctx context.Context, cfg *config.Config, logger *observabili
 		logger,
 	)
 	initiatorHandler := initiator.NewHandler(paymentSvc)
+	refundInitHandler := refundinitiator.NewHandler(refundSvc)
 	baseHandler := outbox.HandlerFunc(func(ctx context.Context, event ports.PendingEvent) error {
 		return basePub.Publish(ctx, event)
 	})
@@ -103,5 +106,6 @@ func buildPublisher(ctx context.Context, cfg *config.Config, logger *observabili
 		outbox.Route{EventType: "*", Handler: baseHandler},
 		outbox.Route{EventType: ports.EventTypeTransactionCallback, Handler: cbDispatcher},
 		outbox.Route{EventType: ports.EventTypeGatewayInitiate, Handler: initiatorHandler},
+		outbox.Route{EventType: ports.EventTypeRefundInitiated, Handler: refundInitHandler},
 	), nil
 }

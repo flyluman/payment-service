@@ -12,16 +12,38 @@ func TestTransitionState_ValidTransitions(t *testing.T) {
 		to   Status
 	}{
 		{StatusPending, StatusProcessing},
+		{StatusPending, StatusAuthorized},
+		{StatusPending, StatusCaptured},
 		{StatusPending, StatusCancelled},
 		{StatusPending, StatusFailed},
-		{StatusProcessing, StatusSucceeded},
+		{StatusProcessing, StatusCaptured},
+		{StatusProcessing, StatusAuthorized},
 		{StatusProcessing, StatusFailed},
-		{StatusSucceeded, StatusRefunded},
-		{StatusSucceeded, StatusRefundFailed},
-		{StatusRefundFailed, StatusRefunded},
+		{StatusAuthorized, StatusCaptured},
+		{StatusAuthorized, StatusFailed},
+		{StatusAuthorized, StatusCancelled},
+		{StatusCaptured, StatusSettled},
+		{StatusCaptured, StatusRefundPending},
+		{StatusCaptured, StatusRefunded},
+		{StatusCaptured, StatusRefundFailed},
+		{StatusCaptured, StatusDisputed},
+		{StatusSettled, StatusRefundPending},
+		{StatusSettled, StatusRefunded},
+		{StatusSettled, StatusRefundFailed},
+		{StatusSettled, StatusDisputed},
+		{StatusRefundPending, StatusRefunded},
+		{StatusRefundPending, StatusRefundFailed},
+		{StatusRefundPending, StatusPartiallyRefunded},
+		{StatusPartiallyRefunded, StatusRefundPending},
+		{StatusPartiallyRefunded, StatusRefunded},
+		{StatusPartiallyRefunded, StatusRefundFailed},
+		{StatusRefundFailed, StatusRefundPending},
+		{StatusDisputed, StatusCaptured},
+		{StatusDisputed, StatusRefunded},
+		{StatusFailed, StatusCancelled},
 	}
 	for _, c := range cases {
-		tx := &Txn{Status: c.from}
+		tx := &Txn{Status: c.from, CancelIntent: true}
 		if err := TransitionState(tx, c.to, ActorSystem); err != nil {
 			t.Errorf("%s → %s: unexpected error %v", c.from, c.to, err)
 		}
@@ -36,13 +58,17 @@ func TestTransitionState_InvalidTransitions(t *testing.T) {
 		from Status
 		to   Status
 	}{
-		{StatusPending, StatusSucceeded},
 		{StatusPending, StatusRefunded},
 		{StatusProcessing, StatusCancelled},
-		{StatusSucceeded, StatusProcessing},
+		{StatusProcessing, StatusPending},
+		{StatusCaptured, StatusProcessing},
+		{StatusCaptured, StatusPending},
+		{StatusCaptured, StatusFailed},
 		{StatusCancelled, StatusPending},
 		{StatusRefunded, StatusRefundFailed},
-		{StatusProcessing, StatusPending},
+		{StatusRefunded, StatusPending},
+		{StatusSettled, StatusPending},
+		{StatusSettled, StatusCaptured},
 	}
 	for _, c := range cases {
 		tx := &Txn{Status: c.from}
@@ -86,7 +112,7 @@ func TestTransitionState_FailedToCancelledRequiresCancelIntent(t *testing.T) {
 func TestTransitionState_ClearsLeaseFieldsLeavingProcessing(t *testing.T) {
 	now := time.Now().UTC()
 	timeout := 30 * time.Second
-	for _, to := range []Status{StatusSucceeded, StatusFailed} {
+	for _, to := range []Status{StatusCaptured, StatusFailed} {
 		tx := &Txn{
 			Status:              StatusProcessing,
 			ProcessingStartedAt: &now,
@@ -119,8 +145,8 @@ func TestTransitionState_UpdatesTimestamp(t *testing.T) {
 
 func TestValidTransitionsFrom_ReturnsCopy(t *testing.T) {
 	got := ValidTransitionsFrom(StatusPending)
-	if len(got) != 3 {
-		t.Fatalf("expected 3 transitions from PENDING, got %d", len(got))
+	if len(got) != 5 {
+		t.Fatalf("expected 5 transitions from PENDING, got %d", len(got))
 	}
 	got[0] = StatusRefunded
 	again := ValidTransitionsFrom(StatusPending)
@@ -130,7 +156,7 @@ func TestValidTransitionsFrom_ReturnsCopy(t *testing.T) {
 }
 
 func TestAllStatuses(t *testing.T) {
-	if len(AllStatuses()) != 7 {
-		t.Errorf("expected 7 statuses, got %d", len(AllStatuses()))
+	if len(AllStatuses()) != 12 {
+		t.Errorf("expected 12 statuses, got %d", len(AllStatuses()))
 	}
 }

@@ -36,7 +36,7 @@ func sampleEvent() ports.PendingEvent {
 		ID:            uuid.New(),
 		AggregateID:   uuid.New(),
 		AggregateType: "transaction",
-		EventType:     ports.EventTypeTransactionSucceeded,
+		EventType:     ports.EventTypeTransactionCaptured,
 		Payload:       []byte(`{"transaction_id":"abc"}`),
 		EventVersion:  1,
 		CreatedAt:     time.Now(),

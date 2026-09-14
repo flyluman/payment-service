@@ -75,14 +75,14 @@ Configure `callback_url` in step 1. Payment Service POSTs here when status chang
 ```json
 {
   "transaction_id": "uuid",
-  "status": "SUCCEEDED",
+  "status": "CAPTURED",
   "amount": 50000,
   "currency": "IQD",
   "gateway_reference_id": "fib_pay_123"
 }
 ```
 
-**Status values:** `PENDING`, `PROCESSING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `REFUNDED`, `REFUND_FAILED`
+**Status values:** `PENDING`, `PROCESSING`, `CAPTURED`, `FAILED`, `CANCELLED`, `REFUNDED`, `REFUND_FAILED`
 
 **Your handler must:**
 - Return `200 OK` within 10 seconds
@@ -104,7 +104,7 @@ Headers:
   "success": true,
   "data": {
     "transaction_id": "uuid",
-    "status": "SUCCEEDED",
+    "status": "CAPTURED",
     "amount": 50000,
     "currency": "IQD",
     "payment_method": "card",
@@ -176,7 +176,7 @@ No request body. Only `PENDING` transactions can be cancelled.
 ## 7. List Payments
 
 ```bash
-GET {PAYMENT_SERVICE_URL}/api/v1/payments?status=SUCCEEDED&limit=50
+GET {PAYMENT_SERVICE_URL}/api/v1/payments?status=CAPTURED&limit=50
 Headers:
   X-Service-Token: {SERVICE_TOKEN}
 ```
@@ -188,7 +188,7 @@ Headers:
 ```json
 {
   "success": true,
-  "data": [ { "transaction_id": "uuid", "amount": 50000, "status": "SUCCEEDED", ... } ],
+  "data": [ { "transaction_id": "uuid", "amount": 50000, "status": "CAPTURED", ... } ],
   "has_more": false,
   "next_cursor": null
 }
