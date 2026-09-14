@@ -63,6 +63,44 @@ const res = await fetch(
 const { data } = await res.json();
 ```
 
+### Display Fee Breakdown (Optional)
+
+The payment response includes a `fee_breakdown` object showing the complete fee structure:
+
+```javascript
+const { fee_breakdown, gateway_amount, gateway_currency } = data;
+
+if (fee_breakdown) {
+  // What the user pays (in their currency)
+  const baseAmount = fee_breakdown.summary.amount;    // e.g. 50000
+  const fees = fee_breakdown.summary.fees;             // e.g. 1750
+  const total = fee_breakdown.summary.total;           // e.g. 51750
+  const currency = fee_breakdown.summary.currency;     // e.g. "IQD"
+
+  // Fee composition
+  const serviceFee = fee_breakdown.fees.service_fee;   // e.g. 1250
+  const fixedCharge = fee_breakdown.fees.fixed_charge; // e.g. 500
+
+  // Exchange rate info (only present for cross-currency)
+  if (fee_breakdown.fees.exchange) {
+    const { base_rate, markup_pct, effective } = fee_breakdown.fees.exchange;
+  }
+
+  // What the gateway receives
+  const gatewayAmt = fee_breakdown.gateway.amount;     // e.g. 51750
+  const gatewayCurr = fee_breakdown.gateway.currency;  // e.g. "IQD"
+}
+```
+
+Display example:
+```
+Item:       50,000 IQD
+Service fee: 1,250 IQD
+Fixed charge:   500 IQD
+─────────────────────
+Total:      51,750 IQD
+```
+
 ### Read FIB QR Code
 
 ```javascript

@@ -82,6 +82,14 @@ func GatewayRegistry(cfg *config.Config, tcs ports.TenantConfigStore) *gateways.
 		},
 	}))
 
+	// Register settlement fetchers — each adapter also implements ports.SettlementReportFetcher.
+	stripeAdapter, _ := registry.Get("stripe")
+	registry.RegisterSettlementFetcher("stripe", stripeAdapter.(ports.SettlementReportFetcher))
+	razorpayAdapter, _ := registry.Get("razorpay")
+	registry.RegisterSettlementFetcher("razorpay", razorpayAdapter.(ports.SettlementReportFetcher))
+	fibAdapter, _ := registry.Get("fib")
+	registry.RegisterSettlementFetcher("fib", fibAdapter.(ports.SettlementReportFetcher))
+
 	return registry
 }
 

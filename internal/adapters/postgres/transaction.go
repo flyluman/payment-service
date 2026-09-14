@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/crownroutes/payment-service/internal/domain/fees"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
@@ -58,6 +59,20 @@ func (r *TransactionRepository) Insert(ctx context.Context, t *transaction.Txn) 
 		return fmt.Errorf("transaction: marshal metadata: %w", err)
 	}
 
+	var feeBreakdown string
+	if t.FeeBreakdown != nil {
+		raw, err := json.Marshal(t.FeeBreakdown)
+		if err != nil {
+			return fmt.Errorf("transaction: marshal fee_breakdown: %w", err)
+		}
+		feeBreakdown = string(raw)
+	}
+
+	var gatewayAmount *int64
+	if t.GatewayAmount != nil {
+		gatewayAmount = t.GatewayAmount
+	}
+
 	_, err = tx.Exec(ctx, `INSERT INTO transactions (
     id, tenant_id, user_id, amount, currency, payment_method, status, version,
     gateway_id, gateway_reference_id, gateway_idempotency_key,
@@ -68,6 +83,8 @@ func (r *TransactionRepository) Insert(ctx context.Context, t *transaction.Txn) 
     processing_started_at, processing_timeout,
     callback_url, redirect_url, token_hash,
     gateway_fee_estimate, gateway_fee_currency, gateway_fee_model_version,
+    fee_breakdown,
+    gateway_amount, gateway_currency,
     created_at, updated_at
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8,
@@ -79,7 +96,9 @@ func (r *TransactionRepository) Insert(ctx context.Context, t *transaction.Txn) 
     $26, $27,
     $28, $29, $30,
     $31, $32, $33,
-    $34, $35
+    $34,
+    $35, $36,
+    $37, $38
 )`,
 		t.ID, t.TenantID, t.UserID, t.Amount, t.Currency, t.PaymentMethod, t.Status, t.Version,
 		t.GatewayID, t.GatewayReferenceID, t.GatewayIdempotencyKey,
@@ -90,6 +109,8 @@ func (r *TransactionRepository) Insert(ctx context.Context, t *transaction.Txn) 
 		t.ProcessingStartedAt, t.ProcessingTimeout,
 		nullIfEmpty(t.CallbackURL), nullIfEmpty(t.RedirectURL), nullIfEmpty(t.TokenHash),
 		t.GatewayFeeEstimate, nullIfEmpty(t.GatewayFeeCurrency), t.GatewayFeeModelVersion,
+		nullIfEmpty(feeBreakdown),
+		gatewayAmount, nullIfEmpty(t.GatewayCurrency),
 		t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
@@ -116,6 +137,8 @@ func (r *TransactionRepository) GetByID(ctx context.Context, id uuid.UUID) (*tra
     processing_started_at, EXTRACT(EPOCH FROM processing_timeout)::double precision,
     callback_url, redirect_url, token_hash,
     gateway_fee_estimate, gateway_fee_currency, gateway_fee_model_version,
+    fee_breakdown,
+    gateway_amount, gateway_currency,
     created_at, updated_at
 FROM transactions
 WHERE id = $1`, id)
@@ -151,6 +174,8 @@ func (r *TransactionRepository) GetByGatewayReference(ctx context.Context, gatew
     processing_started_at, EXTRACT(EPOCH FROM processing_timeout)::double precision,
     callback_url, redirect_url, token_hash,
     gateway_fee_estimate, gateway_fee_currency, gateway_fee_model_version,
+    fee_breakdown,
+    gateway_amount, gateway_currency,
     created_at, updated_at
 FROM transactions
 WHERE gateway_id = $1 AND gateway_reference_id = $2`, gatewayID, reference)
@@ -184,6 +209,15 @@ func (r *TransactionRepository) UpdateStatus(ctx context.Context, t *transaction
 		return fmt.Errorf("transaction: marshal failure_reason: %w", err)
 	}
 
+	var feeBreakdown string
+	if t.FeeBreakdown != nil {
+		raw, err := json.Marshal(t.FeeBreakdown)
+		if err != nil {
+			return fmt.Errorf("transaction: marshal fee_breakdown: %w", err)
+		}
+		feeBreakdown = string(raw)
+	}
+
 	var newVersion int
 	err = tx.QueryRow(ctx, `UPDATE transactions SET
     status                = $1,
@@ -194,9 +228,12 @@ func (r *TransactionRepository) UpdateStatus(ctx context.Context, t *transaction
     method_details        = $5,
     processing_started_at = $6,
     processing_timeout    = $7,
-    updated_at            = $8
-WHERE id = $9
-  AND version = $10
+    fee_breakdown         = $8,
+    gateway_amount        = $9,
+    gateway_currency      = $10,
+    updated_at            = $11
+WHERE id = $12
+  AND version = $13
 RETURNING version`,
 		t.Status,
 		t.ActualGateway,
@@ -205,6 +242,9 @@ RETURNING version`,
 		string(methodDetails),
 		t.ProcessingStartedAt,
 		t.ProcessingTimeout,
+		nullIfEmpty(feeBreakdown),
+		t.GatewayAmount,
+		nullIfEmpty(t.GatewayCurrency),
 		time.Now().UTC(),
 		t.ID,
 		t.Version,
@@ -301,10 +341,12 @@ func scanTransaction(row pgx.Row) (*transaction.Txn, error) {
 	var t transaction.Txn
 	var failureReasonRaw []byte
 	var methodDetailsRaw []byte
+	var feeBreakdownRaw []byte
 	var processingTimeoutSec *float64
 	var cancelBy, cancelVia *string
 	var callbackURL, redirectURL, tokenHash *string
 	var gatewayFeeCurrency *string
+	var gatewayCurrency *string
 
 	err := row.Scan(
 		&t.ID, &t.TenantID, &t.UserID, &t.Amount, &t.Currency, &t.PaymentMethod, &t.Status, &t.Version,
@@ -316,6 +358,8 @@ func scanTransaction(row pgx.Row) (*transaction.Txn, error) {
 		&t.ProcessingStartedAt, &processingTimeoutSec,
 		&callbackURL, &redirectURL, &tokenHash,
 		&t.GatewayFeeEstimate, &gatewayFeeCurrency, &t.GatewayFeeModelVersion,
+		&feeBreakdownRaw,
+		&t.GatewayAmount, &gatewayCurrency,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -334,6 +378,9 @@ func scanTransaction(row pgx.Row) (*transaction.Txn, error) {
 	if gatewayFeeCurrency != nil {
 		t.GatewayFeeCurrency = *gatewayFeeCurrency
 	}
+	if gatewayCurrency != nil {
+		t.GatewayCurrency = *gatewayCurrency
+	}
 
 	if len(failureReasonRaw) > 0 && string(failureReasonRaw) != "null" {
 		if err := json.Unmarshal(failureReasonRaw, &t.FailureReason); err != nil {
@@ -345,6 +392,14 @@ func scanTransaction(row pgx.Row) (*transaction.Txn, error) {
 		if err := json.Unmarshal(methodDetailsRaw, &t.MethodDetails); err != nil {
 			return nil, fmt.Errorf("transaction: unmarshal method_details: %w", err)
 		}
+	}
+
+	if len(feeBreakdownRaw) > 0 && string(feeBreakdownRaw) != "null" {
+		var fb fees.Breakdown
+		if err := json.Unmarshal(feeBreakdownRaw, &fb); err != nil {
+			return nil, fmt.Errorf("transaction: unmarshal fee_breakdown: %w", err)
+		}
+		t.FeeBreakdown = &fb
 	}
 
 	if processingTimeoutSec != nil {
@@ -370,6 +425,13 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullIfBytes(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }
 
 func (r *TransactionRepository) List(ctx context.Context, filter ports.TransactionFilter) (*ports.TransactionListResult, error) {
@@ -402,7 +464,7 @@ func (r *TransactionRepository) List(ctx context.Context, filter ports.Transacti
 		limit = 50
 	}
 	dataBuilder := psql.
-		Select("id", "tenant_id", "user_id", "amount", "currency", "status", "attempted_gateway", "payment_method", "created_at").
+		Select("id", "tenant_id", "user_id", "amount", "currency", "status", "attempted_gateway", "payment_method", "gateway_amount", "gateway_currency", "created_at").
 		From("transactions").
 		Where(where).
 		OrderBy("created_at DESC, id DESC").
@@ -413,6 +475,15 @@ func (r *TransactionRepository) List(ctx context.Context, filter ports.Transacti
 	}
 	if filter.MaxAmount != nil {
 		dataBuilder = dataBuilder.Where("amount <= ?", *filter.MaxAmount)
+	}
+	if filter.MinGatewayAmount != nil {
+		dataBuilder = dataBuilder.Where("gateway_amount >= ?", *filter.MinGatewayAmount)
+	}
+	if filter.MaxGatewayAmount != nil {
+		dataBuilder = dataBuilder.Where("gateway_amount <= ?", *filter.MaxGatewayAmount)
+	}
+	if filter.GatewayCurrency != nil {
+		dataBuilder = dataBuilder.Where("gateway_currency = ?", *filter.GatewayCurrency)
 	}
 	if filter.DateFrom != nil {
 		dataBuilder = dataBuilder.Where("created_at >= ?", *filter.DateFrom)
@@ -436,8 +507,10 @@ func (r *TransactionRepository) List(ctx context.Context, filter ports.Transacti
 	for rows.Next() {
 		var t ports.TransactionSummary
 		var gatewayID, paymentMethod *string
+		var gatewayAmount *int64
+		var gwCurrency *string
 		if err := rows.Scan(&t.ID, &t.TenantID, &t.UserID, &t.Amount, &t.Currency,
-			&t.Status, &gatewayID, &paymentMethod, &t.CreatedAt); err != nil {
+			&t.Status, &gatewayID, &paymentMethod, &gatewayAmount, &gwCurrency, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		if gatewayID != nil {
@@ -445,6 +518,10 @@ func (r *TransactionRepository) List(ctx context.Context, filter ports.Transacti
 		}
 		if paymentMethod != nil {
 			t.PaymentMethod = *paymentMethod
+		}
+		t.GatewayAmount = gatewayAmount
+		if gwCurrency != nil {
+			t.GatewayCurrency = *gwCurrency
 		}
 		txns = append(txns, t)
 	}

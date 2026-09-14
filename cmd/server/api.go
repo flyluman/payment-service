@@ -50,13 +50,14 @@ func startAPI(ctx context.Context, d *deps) error {
 	handler := api.NewRouter(api.Deps{
 		Payment:       handlers.NewPaymentHandler(d.paymentSvc),
 		Pay:           payHandler,
-		Gateway:       handlers.NewGatewayHandler(d.gatewaySvc),
+		Gateway:       handlers.NewGatewayHandler(d.gatewaySvc, d.configStore),
 		TenantGateway: tenantGatewayHandler,
 		Refund:        handlers.NewRefundHandler(d.refundSvc, d.txnRepo),
 		Cancel:        handlers.NewCancelHandler(d.cancelSvc),
 		Webhook:       handlers.NewWebhookHandler(d.webhookSvc, d.registry, d.txnRepo, d.tenantConfigStore, logger),
 		Dispute:       handlers.NewDisputeHandler(d.disputeSvc),
 		DeadLetter:     handlers.NewDeadLetterHandler(d.outboxWriter),
+		Reconciliation: handlers.NewReconciliationHandler(d.reconSvc),
 		SSE:           sseHandler,
 		UI:            uiHandler,
 		Health: handlers.NewHealthHandler(

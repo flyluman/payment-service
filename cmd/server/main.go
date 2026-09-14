@@ -26,6 +26,7 @@ import (
 	"github.com/crownroutes/payment-service/internal/app/payment"
 	"github.com/crownroutes/payment-service/internal/app/refund"
 	"github.com/crownroutes/payment-service/internal/app/webhook"
+	reconapp "github.com/crownroutes/payment-service/internal/app/reconciliation"
 	"github.com/crownroutes/payment-service/internal/bootstrap"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
@@ -58,6 +59,7 @@ type deps struct {
 	webhookSvc *webhook.Service
 	disputeSvc *dispute.Service
 	notifSvc   *notifapp.Service
+	reconSvc   *reconapp.Service
 
 	valkeyClient *valkey.Client
 	rateLimiter  *valkey.RateLimiter
@@ -196,6 +198,9 @@ func run() error {
 	notifSMSSender := notifadapter.NewStubSMSSender(notifadapter.SMSConfig{})
 	notifSvc := notifapp.NewService(notifStore, notifTemplateStore, notifPrefStore, notifEmailSender, notifSMSSender)
 
+	reconStore := postgres.NewReconciliationStore(db)
+	reconSvc := reconapp.NewService(reconStore, txnRepo, txnRepo, registry, logger, metrics)
+
 	// ── Event bus (SSE) ──────────────────────────────────────────────────
 	eventBus := broadcast.NewInMemoryBus()
 	paymentSvc.SetEventBus(eventBus)
@@ -248,6 +253,7 @@ func run() error {
 		webhookSvc: webhookSvc,
 		disputeSvc: disputeSvc,
 		notifSvc:   notifSvc,
+		reconSvc:   reconSvc,
 
 		valkeyClient: valkeyClient,
 		rateLimiter:  rateLimiter,

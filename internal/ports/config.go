@@ -3,6 +3,10 @@ package ports
 import (
 	"context"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/crownroutes/payment-service/internal/domain/fees"
 )
 
 type ConfigStore interface {
@@ -11,6 +15,7 @@ type ConfigStore interface {
 	GetFeeModel(ctx context.Context, gatewayID, paymentMethod string) (*GatewayFeeModel, error)
 	GetMetadataSchema(ctx context.Context, gatewayID string) (*GatewayMetadataSchema, error)
 	GetProcessingTimeout(ctx context.Context, gatewayID, paymentMethod string) (time.Duration, error)
+	GetCurrencyRates(ctx context.Context, tenantID uuid.UUID) ([]fees.CurrencyRate, error)
 }
 
 type GatewayConfig struct {
@@ -40,12 +45,13 @@ func (cb CircuitBreakerState) IsOpen() bool {
 }
 
 type GatewayFeeModel struct {
-	GatewayID                    string
-	PaymentMethod                string
+	GatewayID                  string
+	PaymentMethod              string
 	FixedFee                   int64
 	PercentageBPS              int64
 	InterchangeCap             *int64
 	DiscountVolumeThreshold    int64
+	ChargesCurrency            string
 }
 
 func (f *GatewayFeeModel) CalculateFee(amountUnits, discountVolumeUnits int64) int64 {

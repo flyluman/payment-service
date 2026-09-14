@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/crownroutes/payment-service/internal/domain/fees"
 )
 
 type Status string
@@ -87,6 +89,9 @@ type Txn struct {
 	GatewayFeeEstimate      *int64
 	GatewayFeeCurrency      string
 	GatewayFeeModelVersion  int
+	FeeBreakdown            *fees.Breakdown
+	GatewayAmount           *int64
+	GatewayCurrency         string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 }

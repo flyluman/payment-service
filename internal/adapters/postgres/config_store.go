@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/crownroutes/payment-service/internal/domain/fees"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
 
@@ -151,11 +153,11 @@ WHERE gateway_id = ANY($1)`, gatewayIDs)
 func (s *ConfigStore) GetFeeModel(ctx context.Context, gatewayID, paymentMethod string) (*ports.GatewayFeeModel, error) {
 	var m ports.GatewayFeeModel
 	err := s.db.ReadPool().QueryRow(ctx, `SELECT gateway_id, payment_method, fixed_fee, percentage_bps,
-       interchange_cap, discount_volume_threshold
+       interchange_cap, discount_volume_threshold, COALESCE(charges_currency, '')
 FROM gateway_fee_models
 WHERE gateway_id = $1 AND payment_method = $2`, gatewayID, paymentMethod).Scan(
 		&m.GatewayID, &m.PaymentMethod, &m.FixedFee, &m.PercentageBPS,
-		&m.InterchangeCap, &m.DiscountVolumeThreshold,
+		&m.InterchangeCap, &m.DiscountVolumeThreshold, &m.ChargesCurrency,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -164,6 +166,26 @@ WHERE gateway_id = $1 AND payment_method = $2`, gatewayID, paymentMethod).Scan(
 		return nil, fmt.Errorf("config_store: get fee model %s/%s: %w", gatewayID, paymentMethod, err)
 	}
 	return &m, nil
+}
+
+func (s *ConfigStore) GetCurrencyRates(ctx context.Context, tenantID uuid.UUID) ([]fees.CurrencyRate, error) {
+	rows, err := s.db.ReadPool().Query(ctx, `SELECT from_currency, to_currency, rate, markup_pct, markup_fixed
+FROM tenant_currency_rates
+WHERE tenant_id = $1`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("config_store: get currency rates for tenant %s: %w", tenantID, err)
+	}
+	defer rows.Close()
+
+	var rates []fees.CurrencyRate
+	for rows.Next() {
+		var r fees.CurrencyRate
+		if err := rows.Scan(&r.FromCurrency, &r.ToCurrency, &r.Rate, &r.MarkupPct, &r.MarkupFixed); err != nil {
+			return nil, fmt.Errorf("config_store: scan currency rate: %w", err)
+		}
+		rates = append(rates, r)
+	}
+	return rates, rows.Err()
 }
 
 func (s *ConfigStore) GetMetadataSchema(ctx context.Context, gatewayID string) (*ports.GatewayMetadataSchema, error) {

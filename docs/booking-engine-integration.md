@@ -44,12 +44,19 @@ Headers:
   "data": {
     "transaction_id": "uuid",
     "token": "checkout-token-string",
-    "status": "PENDING"
+    "status": "PENDING",
+    "fee_breakdown": {
+      "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "IQD" },
+      "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },
+      "gateway": { "amount": 51750, "currency": "IQD" }
+    },
+    "gateway_amount": 51750,
+    "gateway_currency": "IQD"
   }
 }
 ```
 
-Save `transaction_id` and `token`. Give `token` to the frontend for checkout.
+Save `transaction_id` and `token`. Give `token` to the frontend for checkout. `fee_breakdown` shows the complete fee structure — what the user pays, how fees are composed, and what the gateway receives.
 
 ## 2. Redirect User to Checkout
 
@@ -107,6 +114,13 @@ Headers:
     "description": "text",
     "metadata": {},
     "gateway_metadata": {},
+    "fee_breakdown": {
+      "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "IQD" },
+      "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },
+      "gateway": { "amount": 51750, "currency": "IQD" }
+    },
+    "gateway_amount": 51750,
+    "gateway_currency": "IQD",
     "created_at": "2026-07-30T10:25:00Z"
   }
 }

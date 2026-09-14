@@ -50,6 +50,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="subtitle">Scan the QR code to complete your payment</div>
 <div class="qr-container"><img id="qrCode" src="" alt="QR Code"></div>
 <div class="payment-detail"><strong>Reference:</strong><br><span id="readableCode"></span></div>
+<div id="feeBreakdown" class="payment-detail" style="display:none"><strong>Total with fees:</strong><br><span id="totalWithFees"></span></div>
 <div class="payment-detail"><strong>Time Remaining:</strong><br><span id="timer">Calculating...</span></div>
 <a id="personalLink" href="#" target="_blank" class="btn btn-primary" rel="noopener">Pay with Personal App</a>
 <a id="businessLink" href="#" target="_blank" class="btn btn-secondary" rel="noopener">Pay with Business App</a>
@@ -215,6 +216,13 @@ $('businessLink').href=meta.business_app_link||'#';
 $('corporateLink').href=meta.corporate_app_link||'#';
 showSection('qrSection');
 startTimer(meta.valid_until);
+
+var fb=PAGE_DATA.fee_breakdown;
+if(fb&&fb.summary&&fb.summary.total>0){
+var el=$('feeBreakdown');
+el.style.display='block';
+$('totalWithFees').textContent='IQD '+fb.summary.total.toLocaleString();
+}
 }
 
 function renderStripe(meta){

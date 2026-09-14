@@ -20,6 +20,7 @@ type Deps struct {
 	Webhook        *handlers.WebhookHandler
 	Dispute        *handlers.DisputeHandler
 	DeadLetter     *handlers.DeadLetterHandler
+	Reconciliation *handlers.ReconciliationHandler
 	Health         *handlers.HealthHandler
 	SSE            *handlers.SSEHandler
 	UI             http.Handler
@@ -82,6 +83,14 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.DeadLetter != nil {
 		mux.HandleFunc("GET /api/v1/dead-letters", deps.DeadLetter.List)
 		mux.HandleFunc("POST /api/v1/dead-letters/{id}/replay", deps.DeadLetter.Replay)
+	}
+	if deps.Reconciliation != nil {
+		mux.HandleFunc("POST /api/v1/reconciliation/jobs", deps.Reconciliation.CreateJob)
+		mux.HandleFunc("GET /api/v1/reconciliation/jobs", deps.Reconciliation.ListJobs)
+		mux.HandleFunc("GET /api/v1/reconciliation/jobs/{id}", deps.Reconciliation.GetJob)
+		mux.HandleFunc("POST /api/v1/reconciliation/jobs/{id}/run", deps.Reconciliation.RunJob)
+		mux.HandleFunc("GET /api/v1/reconciliation/jobs/{id}/entries", deps.Reconciliation.GetEntries)
+		mux.HandleFunc("POST /api/v1/reconciliation/jobs/{id}/entries/{entry_id}/resolve", deps.Reconciliation.ResolveEntry)
 	}
 
 	// Static UI (legacy, optional)

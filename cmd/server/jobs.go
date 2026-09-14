@@ -10,6 +10,7 @@ import (
 	gatewaymetrics "github.com/crownroutes/payment-service/internal/jobs/gateway_metrics"
 	tenantwebhook "github.com/crownroutes/payment-service/internal/jobs/tenant_webhook"
 	notifprocessor "github.com/crownroutes/payment-service/internal/jobs/notification"
+	reconjob "github.com/crownroutes/payment-service/internal/jobs/reconciliation"
 )
 
 const defaultPartitionInterval = time.Hour
@@ -53,12 +54,22 @@ func startJobs(ctx context.Context, d *deps) error {
 	twhInterval := 5 * time.Second
 	notifInterval := 2 * time.Second
 
+	reconInterval := time.Duration(cfg.Jobs.ReconciliationIntervalSec) * time.Second
+	if reconInterval <= 0 {
+		reconInterval = 5 * time.Minute
+	}
+	reconStore := postgres.NewReconciliationStore(d.db)
+	reconScheduler := reconjob.NewScheduler(reconStore, d.reconSvc, logger, reconjob.Config{
+		Interval: reconInterval,
+	})
+
 	// Run once at startup.
 	runJobOnce(ctx, logger, "partition_manager", func(c context.Context) error { return partMgr.RunOnce(c) })
 	runJobOnce(ctx, logger, "lease_expiry", func(c context.Context) error { return reaper.RunOnce(c) })
 	runJobOnce(ctx, logger, "gateway_metrics", func(c context.Context) error { return gwMetricsJob.RunOnce(c) })
 	runJobOnce(ctx, logger, "tenant_webhook", func(c context.Context) error { return twhWorker.RunOnce(c) })
 	runJobOnce(ctx, logger, "notification", func(c context.Context) error { return notifProcessor.RunOnce(c) })
+	runJobOnce(ctx, logger, "reconciliation", func(c context.Context) error { return reconScheduler.RunOnce(c) })
 
 	leaseTicker := time.NewTicker(leaseInterval)
 	defer leaseTicker.Stop()
@@ -70,6 +81,8 @@ func startJobs(ctx context.Context, d *deps) error {
 	defer twhTicker.Stop()
 	notifTicker := time.NewTicker(notifInterval)
 	defer notifTicker.Stop()
+	reconTicker := time.NewTicker(reconInterval)
+	defer reconTicker.Stop()
 
 	logger.Info("jobs.scheduled", map[string]any{
 		"lease_expiry_interval":        leaseInterval.String(),
@@ -77,6 +90,7 @@ func startJobs(ctx context.Context, d *deps) error {
 		"gateway_metrics_interval":     gwMetricsInterval.String(),
 		"tenant_webhook_interval":      twhInterval.String(),
 		"notification_interval":        notifInterval.String(),
+		"reconciliation_interval":      reconInterval.String(),
 	})
 
 	for {
@@ -94,6 +108,8 @@ func startJobs(ctx context.Context, d *deps) error {
 			runJobOnce(ctx, logger, "tenant_webhook", func(c context.Context) error { return twhWorker.RunOnce(c) })
 		case <-notifTicker.C:
 			runJobOnce(ctx, logger, "notification", func(c context.Context) error { return notifProcessor.RunOnce(c) })
+		case <-reconTicker.C:
+			runJobOnce(ctx, logger, "reconciliation", func(c context.Context) error { return reconScheduler.RunOnce(c) })
 		}
 	}
 }

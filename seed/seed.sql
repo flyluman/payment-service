@@ -38,15 +38,16 @@ ON CONFLICT (gateway_id, payment_method) DO UPDATE SET
     payment_method_buffer_sec = EXCLUDED.payment_method_buffer_sec;
 
 -- ── Gateway fee models ──────────────────────────────────────────────────
--- FIB: no fees in dev sandbox.
+-- FIB: charges in IQD, reverse-inclusive 2.5% service fee + 500 IQD fixed.
 
-INSERT INTO gateway_fee_models (gateway_id, payment_method, fixed_fee, percentage_bps, interchange_cap, discount_volume_threshold)
-VALUES ('fib', 'card', 0, 0, NULL, 0)
+INSERT INTO gateway_fee_models (gateway_id, payment_method, fixed_fee, percentage_bps, interchange_cap, discount_volume_threshold, charges_currency)
+VALUES ('fib', 'card', 500, 250, NULL, 0, 'IQD')
 ON CONFLICT (gateway_id, payment_method) DO UPDATE SET
     fixed_fee = EXCLUDED.fixed_fee,
     percentage_bps = EXCLUDED.percentage_bps,
     interchange_cap = EXCLUDED.interchange_cap,
-    discount_volume_threshold = EXCLUDED.discount_volume_threshold;
+    discount_volume_threshold = EXCLUDED.discount_volume_threshold,
+    charges_currency = EXCLUDED.charges_currency;
 
 -- ── Gateway metadata schemas ────────────────────────────────────────────
 -- FIB returns: qr_code, readable_code, personal_app_link, business_app_link, corporate_app_link, valid_until.
@@ -160,6 +161,18 @@ VALUES
 ON CONFLICT (gateway_id) DO UPDATE SET
     state = EXCLUDED.state,
     consecutive_failures = EXCLUDED.consecutive_failures;
+
+-- ── Currency exchange rates ──────────────────────────────────────────────
+-- Example: USD→IQD with 3% markup, IQD→USD with 2% markup.
+
+INSERT INTO tenant_currency_rates (tenant_id, from_currency, to_currency, rate, markup_pct, markup_fixed)
+VALUES
+    ('11111111-1111-1111-1111-111111111111', 'USD', 'IQD', 1500, 3, 0),
+    ('11111111-1111-1111-1111-111111111111', 'IQD', 'USD', 0.000667, 2, 0)
+ON CONFLICT (tenant_id, from_currency, to_currency) DO UPDATE SET
+    rate = EXCLUDED.rate,
+    markup_pct = EXCLUDED.markup_pct,
+    markup_fixed = EXCLUDED.markup_fixed;
 
 COMMIT;
 

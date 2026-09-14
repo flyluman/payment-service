@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/crownroutes/payment-service/internal/domain/fees"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
@@ -137,6 +138,10 @@ func (c *fakeConfig) GetProcessingTimeout(ctx context.Context, gatewayID, paymen
 }
 
 func (c *fakeConfig) GetFeeModel(ctx context.Context, gatewayID, paymentMethod string) (*ports.GatewayFeeModel, error) {
+	return nil, nil
+}
+
+func (c *fakeConfig) GetCurrencyRates(ctx context.Context, tenantID uuid.UUID) ([]fees.CurrencyRate, error) {
 	return nil, nil
 }
 

@@ -30,7 +30,9 @@ This document describes the architecture, the core domain logic, and the operati
 - [20. API Reference](#20-api-reference)
 - [21. Configuration](#21-configuration)
 - [22. Running Locally](#22-running-locally)
-- [23. Testing](#23-testing)
+- [23. Fee System](#23-fee-system)
+- [24. Reconciliation](#24-reconciliation)
+- [25. Testing](#25-testing)
 
 ---
 
@@ -40,9 +42,9 @@ The service runs as a **single process** (`cmd/server`) that spawns all three co
 
 | Goroutine | Responsibility |
 |---|---|
-| **API server** | HTTP server: create/process payments, refunds, cancellations, receive gateway webhooks, health checks |
+| **API server** | HTTP server: create/process payments, refunds, cancellations, receive gateway webhooks, health checks, reconciliation management |
 | **Outbox relay** | Polls the transactional outbox and publishes domain events downstream |
-| **Background jobs** | Runs `partition_manager` and `lease_expiry` on tickers (immediate first run, then periodic) |
+| **Background jobs** | Runs `partition_manager`, `lease_expiry`, `gateway_metrics`, `tenant_webhook`, `notification`, and `reconciliation` on tickers (immediate first run, then periodic) |
 
 A single `SIGINT` / `SIGTERM` propagates through a shared context so all three shut down together.
 
@@ -143,26 +145,33 @@ internal/
     transaction/   Txn entity + state machine
     refund/        Refund entity + over-refund guard
     gateway/       Circuit breaker state machine, discrepancy metrics
+    fees/          Fee calculation: nested breakdown (summary + fees + exchange + gateway)
+    reconciliation/ Job + Entry entities, mismatch types, auto-resolution config
   app/
     payment/       Create, ProcessPayment, ProcessGatewayInitiate, GetGatewayMetadata, RecoverExpiredLease
     refund/        InitiateRefund, ProcessRefund, ResolveCancelRefund
     cancel/        Cancel intent handling
     webhook/       Inbound webhook → transaction resolution
     idempotency/   Reserve/Lookup/Complete guard used by payment & refund
+    reconciliation/ Reconciliation orchestration: compare transactions against gateway settlement reports
   adapters/
     postgres/      Repositories, migrations-backed queries, Transactor
     valkey/        Rate limiter (token bucket, Lua), circuit breaker store
-    gateways/      stripe/, razorpay/, fib/ adapters + webhook parsers
+    gateways/      stripe/, razorpay/, fib/ adapters + webhook parsers + settlement fetchers
     security/      mTLS certificate manager
     encryption/    Envelope encryption (KMS-style key manager)
     observability/ slog logger with field redaction, OTel metrics
     sns/           AWS SNS publisher
   api/
-    handlers/      HTTP handlers (payment, refund, cancel, webhook, health, pay)
+    handlers/      HTTP handlers (payment, refund, cancel, webhook, health, pay, reconciliation)
     middleware/    Auth, RateLimit, RequestID, TraceID, RequestLog, Recover
   jobs/
     partition_manager/  Weekly outbox partition lifecycle
     lease_expiry/       Stuck-transaction reaper + idempotency-key sweep
+    gateway_metrics/    Circuit breaker + latency metrics persistence
+    tenant_webhook/     Outbound webhook delivery with retry
+    notification/       Email/SMS queue processor
+    reconciliation/     Background settlement reconciliation scheduler
   relay/           Generic outbox polling worker + publisher interface
   ports/           All interfaces + shared types (GatewayAdapter, Logger, ...)
   testsupport/     Shared Postgres/Valkey test harness
@@ -697,8 +706,8 @@ The token is a 32-byte cryptographically random value (SHA-256 hashed on the tra
 | `GET` | `/pay/success` | checkout token (`?token=`) | Payment success landing page |
 | `GET` | `/pay/failure` | checkout token (`?token=`) | Payment failure landing page |
 | `GET` | `/api/v1/gateways` | service/ops token | List available gateways (optional `?payment_method=` filter) |
-| `POST` | `/api/v1/payments` | service token | Create transaction + initiate gateway payment (single step). Requires `Idempotency-Key`. Returns `transaction_id`, `gateway_metadata`, `status`, `token`. On sync initiate failure => 500 (retry with same idempotency key). |
-| `GET` | `/api/v1/payments/{id}` | service/ops or checkout token (`?token=`) | Fetch a transaction by ID |
+| `POST` | `/api/v1/payments` | service token | Create transaction + initiate gateway payment (single step). Requires `Idempotency-Key`. Returns `transaction_id`, `gateway_metadata`, `fee_breakdown`, `status`, `token`. On sync initiate failure => 500 (retry with same idempotency key). |
+| `GET` | `/api/v1/payments/{id}` | service/ops or checkout token (`?token=`) | Fetch a transaction by ID (includes `fee_breakdown`, `gateway_amount`, `gateway_currency`) |
 | `POST` | `/api/v1/payments/{id}/refunds` | service/ops token | Initiate + immediately attempt a refund. Requires `Idempotency-Key`. |
 | `POST` | `/api/v1/payments/{id}/cancel` | service/ops token | Request cancellation (idempotent; safe on already-terminal transactions) |
 | `GET` | `/api/v1/payments/{id}/events` | service/ops or checkout token (`?token=`) | SSE stream of transaction status changes |
@@ -707,6 +716,12 @@ The token is a 32-byte cryptographically random value (SHA-256 hashed on the tra
 | `POST` | `/api/v1/tenants/{tenant_id}/gateways` | service/ops token | Create or update a tenant gateway config |
 | `DELETE` | `/api/v1/tenants/{tenant_id}/gateways/{gateway_id}` | service/ops token | Delete a tenant gateway config |
 | `POST` | `/webhooks/gateway/{gateway_id}` | gateway signature | Inbound gateway status callback (uses `?transaction_id=` query param for tenant resolution) |
+| `POST` | `/api/v1/reconciliation/jobs` | service/ops token | Create a reconciliation job (single-transaction or batch by period) |
+| `GET` | `/api/v1/reconciliation/jobs` | service/ops token | List reconciliation jobs (filter by `?gateway_id=`, `?status=`) |
+| `GET` | `/api/v1/reconciliation/jobs/{id}` | service/ops token | Get a single reconciliation job |
+| `POST` | `/api/v1/reconciliation/jobs/{id}/run` | service/ops token | Execute a pending reconciliation job |
+| `GET` | `/api/v1/reconciliation/jobs/{id}/entries` | service/ops token | List reconciliation entries for a job (filter by `?mismatch_type=`, `?resolution_status=`) |
+| `POST` | `/api/v1/reconciliation/jobs/{id}/entries/{entry_id}/resolve` | service/ops token | Mark a reconciliation entry as resolved |
 
 ### Request/Response Examples
 
@@ -742,7 +757,14 @@ Content-Type: application/json
     "gateway_metadata": {
       "client_secret": "pi_xxx_secret_yyy",
       "publishable_key": "pk_test_xxx"
-    }
+    },
+    "fee_breakdown": {
+      "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "BDT" },
+      "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },
+      "gateway": { "amount": 51750, "currency": "BDT" }
+    },
+    "gateway_amount": 51750,
+    "gateway_currency": "BDT"
   },
   "request_id": "req-uuid",
   "timestamp": "2026-01-01T00:00:00.000000000Z"
@@ -764,7 +786,14 @@ Content-Type: application/json
       "business_app_link": "https://fib.app/business/...",
       "corporate_app_link": "https://fib.app/corporate/...",
       "valid_until": "2026-01-01T00:05:00Z"
-    }
+    },
+    "fee_breakdown": {
+      "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "IQD" },
+      "fees": { "service_fee": 1250, "fixed_charge": 500, "total": 1750 },
+      "gateway": { "amount": 51750, "currency": "IQD" }
+    },
+    "gateway_amount": 51750,
+    "gateway_currency": "IQD"
   },
   "request_id": "req-uuid",
   "timestamp": "2026-01-01T00:00:00.000000000Z"
@@ -793,7 +822,7 @@ All configuration comes from `config.yaml` with environment variable overrides, 
 | Outbox | `OUTBOX_RELAY_BATCH_SIZE`, `OUTBOX_RELAY_MAX_ATTEMPTS`, WAL-lag alert thresholds | Shard count fixed at 64 by schema |
 | Rate limit | `RATE_LIMIT_FALLBACK_MULTIPLIER` (0,1], `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_SEC` | |
 | Security | `ENCRYPTION_KEY`, `TLS_CERT_FILE/KEY_FILE/CA_FILE`, `TLS_CERT_REFRESH_INTERVAL_SECONDS`, `SERVICE_TOKENS`, `OPS_TOKENS` | `ENCRYPTION_KEY` is a hex-encoded 256-bit key for field-level encryption of gateway credentials in `tenant_gateway_configs`; without it, credentials stored as plaintext. TLS optional; omit to run plain HTTP. Webhook secrets are per-tenant from `tenant_gateway_configs` table |
-| Jobs | `LEASE_EXPIRY_INTERVAL_SECONDS`, `LEASE_REAPER_IDEMPOTENCY_TIMEOUT_SEC`, `PARTITION_*` | |
+| Jobs | `LEASE_EXPIRY_INTERVAL_SECONDS`, `LEASE_REAPER_IDEMPOTENCY_TIMEOUT_SEC`, `PARTITION_*`, `RECONCILIATION_INTERVAL_SECONDS` | `RECONCILIATION_INTERVAL_SECONDS` (default 300) controls how often the background reconciliation scheduler checks for pending jobs |
 | Gateways | `CIRCUIT_BREAKER_FAILURE_THRESHOLD`, `GATEWAY_HTTP_TIMEOUT` | All gateway credentials (API keys, secrets, base URLs, publishable keys, webhook secrets) are per-tenant from `tenant_gateway_configs` table (encrypted at rest). No global env vars for secrets. |
 | Auth | `SERVICE_TOKENS` (`token=tenantID:userID,...`), `OPS_TOKENS` (comma-separated) | Must be configured — server will not start without at least one token. Browser checkout paths use per-transaction checkout tokens instead. |
 
@@ -869,7 +898,103 @@ Import `postman/collection.json` into Postman (use `postman/environment.json` fo
 
 ---
 
-## 23. Testing
+## 23. Fee System
+
+The payment service calculates fees before calling the gateway, so the user sees the total cost at checkout with no surprise on their bank statement.
+
+### Fee Breakdown Structure
+
+The `fee_breakdown` field in payment responses has a nested 2-part structure:
+
+```json
+{
+  "summary": { "amount": 50000, "fees": 1750, "total": 51750, "currency": "IQD" },
+  "fees": {
+    "service_fee": 1250,
+    "fixed_charge": 500,
+    "total": 1750,
+    "exchange": { "base_rate": 1500, "markup_pct": 3, "effective": 1545 }
+  },
+  "gateway": { "amount": 51750, "currency": "IQD" }
+}
+```
+
+- **`summary`**: what the user pays — base amount, fees, total, all in user's currency
+- **`fees`**: how fees are composed — service fee (reverse-inclusive percentage), fixed charge, optional exchange info (only present when currency conversion applies)
+- **`gateway`**: what the gateway receives — final amount in gateway's currency
+
+### Two-Layer Fee Calculation
+
+1. **Layer 1 — Exchange rate with markup**: converts user amount to gateway charges currency using `effectiveRate = baseRate + (baseRate/100 * markupPct) + markupFixed`
+2. **Layer 2 — Reverse-inclusive service fee + fixed charge**: `serviceFee = amount / (1 - ratio/100) - amount`, then adds fixed charge. All in gateway currency, converted back to user currency for display.
+
+### Gateway Amount
+
+`gateway_amount` and `gateway_currency` are first-class columns on the `transactions` table (not just inside `fee_breakdown` JSONB) for efficient aggregation and reconciliation queries.
+
+---
+
+## 24. Reconciliation
+
+Reconciliation compares internal transaction records against gateway settlement reports to detect discrepancies.
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph "Background Scheduler"
+        Scheduler[reconciliation.Scheduler<br/>runs on ticker]
+    end
+
+    subgraph "Reconciliation Service"
+        CreateJob[CreateJob<br/>single or batch]
+        RunJob[RunJob<br/>fetch + compare]
+        Compare[compareTransaction<br/>status/amount/fee check]
+    end
+
+    subgraph "Settlement Fetchers"
+        Stripe[Stripe<br/>BalanceTransaction API]
+        Razorpay[Razorpay<br/>Payment Listing API]
+        FIB[FIB<br/>stub — no endpoint]
+    end
+
+    Scheduler --> RunJob
+    CreateJob --> Store[(Postgres<br/>reconciliation_jobs<br/>reconciliation_entries)]
+    RunJob --> Fetcher[SettlementReportFetcher]
+    RunJob --> TxnList[TransactionRepository]
+    Fetcher --> Stripe & Razorpay & FIB
+    RunJob --> Compare
+    Compare --> Store
+```
+
+### Mismatch Types
+
+| Type | Meaning | Critical? |
+|------|---------|-----------|
+| `STATUS_MISMATCH` | Internal status differs from gateway status | Yes |
+| `AMOUNT_MISMATCH` | Internal amount differs from gateway amount | No |
+| `FEE_MISMATCH` | Internal fees differ from gateway fees | No |
+| `MISSING_INTERNAL` | Gateway has entry, internal doesn't | Yes |
+| `MISSING_GATEWAY` | Internal has entry, gateway doesn't | No |
+
+### Auto-Resolution
+
+Amount mismatches within configurable thresholds (basis points + absolute cap) are eligible for automatic resolution. Status mismatches and missing-internal entries always require manual review.
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/reconciliation/jobs` | Create a job (single-transaction or batch by period) |
+| `GET` | `/api/v1/reconciliation/jobs` | List jobs |
+| `GET` | `/api/v1/reconciliation/jobs/{id}` | Get a job |
+| `POST` | `/api/v1/reconciliation/jobs/{id}/run` | Execute a pending job |
+| `GET` | `/api/v1/reconciliation/jobs/{id}/entries` | List mismatch entries |
+| `POST` | `/api/v1/reconciliation/jobs/{id}/entries/{entry_id}/resolve` | Mark entry resolved |
+
+---
+
+## 25. Testing
 
 - **Unit tests** live alongside the code they test (`*_test.go`) and use hand-written fakes for every port (`fakeRepo`, `fakeOutbox`, `fakeRegistry`, …) — no mocking framework, no real I/O.
 - **Integration tests** (`test/integration/`, and `*_integration_test.go` under `adapters/postgres` and `adapters/valkey`) are gated behind the `integration` build tag and require the Postgres/Valkey containers above (`docker compose up -d postgres valkey`); they exercise real concurrency (goroutine races against actual row locks, actual Valkey Lua scripts) for things a fake can't prove, e.g.:

@@ -55,6 +55,22 @@ Payouts, Automatic Gateway Routing, Subscriptions, Save Card / Vault, Customer M
 
 **Note:** The `gateway_fee_models` table and `ports.GatewayFeeModel.CalculateFee()` already exist. They're just never called.
 
+The fee system was redesigned as part of the reconciliation work (commit `55ab19c`):
+
+**Fee system redesign:**
+- `internal/domain/fees/fees.go` — complete rewrite with nested 2-part breakdown:
+  - `Breakdown{Summary, FeeDetail{Exchange}, Gateway}` — structured JSON output
+  - `Calculate()` — two-layer formula: Layer 1 (exchange rate with markup), Layer 2 (reverse-inclusive service fee + fixed charge)
+  - `Validate()` — consistency checks on breakdown
+- `internal/api/handlers/gateway.go` — `FeeEstimator` interface for per-gateway fee estimation endpoint
+- `internal/app/payment/service.go` — `fees.Calculate()` called in `ProcessGatewayInitiate()`, sets `txn.GatewayAmount`/`txn.GatewayCurrency`
+
+**gateway_amount/gateway_currency columns:**
+- Added `gateway_amount BIGINT` and `gateway_currency CHAR(3)` as first-class columns on `transactions` table (not just JSONB)
+- Domain model: `transaction.Txn` has `GatewayAmount *int64` and `GatewayCurrency string`
+- API responses: `paymentResponse` includes `gateway_amount` and `gateway_currency`
+- Transaction filter: `MinGatewayAmount`, `MaxGatewayAmount`, `GatewayCurrency` added to `TransactionFilter`
+
 **Modify:**
 - `internal/domain/transaction/transaction.go` — add fields: `gateway_fee_estimate BIGINT`, `gateway_fee_currency CHAR(3)`, `gateway_fee_model_version INT`. Add accessor methods.
 - `internal/app/payment/service.go` — in `Create` method: after `SelectGateway`, call `configStore.GetFeeModel(gatewayID, paymentMethod)`, call `feeModel.CalculateFee(amount)`, set `gatewayFeeEstimate` and `gatewayFeeCurrency` on transaction before insert.
@@ -348,76 +364,66 @@ INSERT INTO notification_templates (name, subject, body_text, body_html, sms_tex
   - Map `BalanceTransaction` fields to `SettlementEntry` (amount is in cents, Stripe fee is in `fee` field, exchange rate in `exchange_rate`)
   - Return `SettlementReport` struct
 - `internal/adapters/gateways/razorpay/settlement.go`:
-  - Call Razorpay's Settlement API: `GET /v1/settlements` with date range filter
-  - Map fields appropriately
+  - Call Razorpay's payment listing API: `GET /v1/payments` with date range filter
+  - Map fields appropriately (fee from `fee` field, status from `status`)
 - `internal/adapters/gateways/fib/settlement.go`:
-  - FIB-specific settlement endpoint handling (may be CSV download or API endpoint)
+  - FIB stub — returns empty report (no dedicated settlement endpoint available)
 
 **Modify:**
-- `internal/adapters/gateways/registry.go` — update registry to also provide `SettlementReportFetcher` per gateway
-- `internal/ports/gateway.go` — `SettlementReportFetcher` interface already exists (lines 189-191). Add method to `GatewayAdapter` interface or keep as separate retrieval:
-  ```go
-  type SettlementReportFetcher interface {
-      FetchSettlementReport(ctx context.Context, gatewayID string, start, end time.Time) (*SettlementReport, error)
-  }
-  ```
+- `internal/adapters/gateways/registry.go` — added `SettlementFetcher(gatewayID)` method and `RegisterSettlementFetcher` for per-gateway settlement fetcher access
+- `internal/bootstrap/bootstrap.go` — register settlement fetchers for all 3 gateways after adapter registration
 
 ### 4.2 Reconciliation App Service
 
+**Implemented.**
+
 **New files:**
 - `internal/app/reconciliation/service.go`:
-  - `Service` struct with deps: `JobStore`, `EntryStore`, `SettlementReportFetcher` (per gateway via registry), `TransactionRepo`, `ConfigStore`, `Logger`, `Metrics`
-  - `CreateJob(ctx, gatewayID, periodStart, periodEnd, triggeredBy) (*Job, error)` — insert `reconciliation_job` with `PENDING` status
-  - `CreateSingleTxnJob(ctx, transactionID, triggeredBy) (*Job, error)` — single-transaction reconciliation
-  - `RunJob(ctx, jobID) error`:
-    1. Load job, set `status = 'RUNNING'`, `started_at = NOW()`
-    2. Get `SettlementReportFetcher` for job's gateway
-    3. Call `FetchSettlementReport(ctx, gatewayID, periodStart, periodEnd)` or `CheckStatus(ctx, transactionID)` for single txn
-    4. For each settlement entry, compare against internal `transactions` table
-    5. Create `reconciliation_entries` for each mismatch
-    6. Run `EligibleForAutoResolution` on amount mismatches
-    7. Log auto-resolution decisions to `settlement_auto_resolution_log`
-    8. Set `mismatch_count`, `status = 'COMPLETED'`, `completed_at = NOW()`
-  - `ListJobs(ctx, filters) ([]Job, error)`
-  - `GetJob(ctx, id) (*Job, error)`
-  - `GetEntries(ctx, jobID, filters) ([]Entry, error)`
-  - `ResolveEntry(ctx, entryID, resolvedBy, notes) error`
+  - `Service` struct with deps: `ReconciliationStore`, `TransactionReader`, `TransactionLister`, `GatewayRegistry`, `Logger`, `Metrics`
+  - `CreateJob(ctx, gatewayID, periodStart, periodEnd, transactionID, triggeredBy)` — insert job with `PENDING` status
+  - `RunJob(ctx, jobID)` — fetch settlement report, compare against internal transactions, create entries for mismatches
+  - `reconcileSingle(ctx, job)` — single-transaction reconciliation using txn.CreatedAt ±24h window
+  - `reconcileBatch(ctx, job)` — batch reconciliation: fetch internal txns by gateway+period, compare against settlement report
+  - `compareTransaction(txn, settlementEntry, jobID)` — compare status, amount, fees; return Entry for mismatches or nil if match
+  - `ListJobs`, `GetJob`, `GetEntries`, `ResolveEntry` — CRUD passthrough to store
 - `internal/adapters/postgres/reconciliation.go` — `ReconciliationStore` with methods:
   - `CreateJob`, `UpdateJob`, `GetJob`, `ListJobs`
-  - `InsertEntries`, `GetEntries`, `UpdateEntry`
+  - `InsertEntries` (batch), `GetEntries`, `UpdateEntry`
   - `GetPendingJobs`, `GetAutoResolutionConfig`
 
 ### 4.3 Reconciliation Background Job
 
+**Implemented.**
+
 **New files:**
 - `internal/jobs/reconciliation/job.go` — `Scheduler` struct:
-  - `RunOnce(ctx)` — query `reconciliation_jobs WHERE status = 'PENDING' AND triggered_by = 'system' ORDER BY created_at ASC LIMIT 1`, call `reconSvc.RunJob(ctx, jobID)`
-  - Config: `Interval` (default 1h), `BatchSize`
+  - `RunOnce(ctx)` — query pending jobs (status=PENDING, triggered_by=system), call `reconSvc.RunJob(ctx, jobID)` for each
+  - Config: `Interval` (default 1h), `BatchSize` (default 5)
 
 **Modify:**
-- `cmd/server/jobs.go` — add reconciliation ticker (configurable interval, default 1h), run at startup
-- `config/config.go` — add `Jobs.ReconciliationIntervalSec` (env `RECONCILIATION_INTERVAL_SECONDS`, default 3600)
+- `cmd/server/jobs.go` — add reconciliation ticker (configurable interval, default 5min), run at startup
+- `config/config.go` — added `Jobs.ReconciliationIntervalSec` (env `RECONCILIATION_INTERVAL_SECONDS`, default 300)
 
 ### 4.4 Reconciliation API
+
+**Implemented.**
 
 **New files:**
 - `internal/api/handlers/reconciliation.go` — `ReconciliationHandler`:
   - `CreateJob` — `POST /api/v1/reconciliation/jobs` (body: `{gateway_id, period_start, period_end}` or `{transaction_id}`)
+  - `RunJob` — `POST /api/v1/reconciliation/jobs/{id}/run`
   - `GetJob` — `GET /api/v1/reconciliation/jobs/{id}`
-  - `ListJobs` — `GET /api/v1/reconciliation/jobs` (filter by gateway, status, date range)
+  - `ListJobs` — `GET /api/v1/reconciliation/jobs` (filter by gateway, status)
   - `GetEntries` — `GET /api/v1/reconciliation/jobs/{id}/entries` (filter by mismatch_type, resolution_status)
-  - `ResolveEntry` — `POST /api/v1/reconciliation/jobs/{job_id}/entries/{entry_id}/resolve` (body: `{notes}`)
+  - `ResolveEntry` — `POST /api/v1/reconciliation/jobs/{id}/entries/{entry_id}/resolve` (body: `{notes}`)
+- `internal/ports/reconciliation.go` — `ReconciliationStore`, `SettlementReportFetcher`, `SettlementReport`, `SettlementEntry`, filter types
 
 **Modify:**
 - `internal/api/router.go`:
-  - Add `Reconciliation *handlers.ReconciliationHandler` to `Deps`
-  - Add routes:
-    - `POST /api/v1/reconciliation/jobs`
-    - `GET /api/v1/reconciliation/jobs`
-    - `GET /api/v1/reconciliation/jobs/{id}`
-    - `GET /api/v1/reconciliation/jobs/{id}/entries`
-    - `POST /api/v1/reconciliation/jobs/{id}/entries/{entry_id}/resolve`
-- `cmd/server/main.go` — wire `ReconciliationStore`, `ReconciliationService`, `ReconciliationHandler` into `deps`
+  - Added `Reconciliation *handlers.ReconciliationHandler` to `Deps`
+  - Added 6 reconciliation routes under `/api/v1/reconciliation/`
+- `cmd/server/main.go` — wired `ReconciliationStore`, `ReconciliationService`, `ReconciliationHandler` into `deps`
+- `internal/bootstrap/bootstrap.go` — register settlement fetchers for all 3 gateways
 
 ---
 

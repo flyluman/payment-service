@@ -7,7 +7,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/crownroutes/payment-service/internal/api/response"
+	"github.com/crownroutes/payment-service/internal/domain/fees"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
 
@@ -22,11 +25,20 @@ func (f *fakeGatewayService) ListActiveGateways(_ context.Context, methods []str
 	return f.configs, f.err
 }
 
+type fakeFeeEstimator struct{}
+
+func (f *fakeFeeEstimator) GetFeeModel(_ context.Context, _, _ string) (*ports.GatewayFeeModel, error) {
+	return nil, nil
+}
+func (f *fakeFeeEstimator) GetCurrencyRates(_ context.Context, _ uuid.UUID) ([]fees.CurrencyRate, error) {
+	return nil, nil
+}
+
 func TestList_Success(t *testing.T) {
 	svc := &fakeGatewayService{configs: []*ports.GatewayConfig{
 		{GatewayID: "stripe", DisplayName: "Stripe", IsActive: true, SupportedMethods: []string{"card"}, SupportedCurrencies: []string{"USD"}},
 	}}
-	h := NewGatewayHandler(svc)
+	h := NewGatewayHandler(svc, &fakeFeeEstimator{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateways", nil)
 	rec := httptest.NewRecorder()
@@ -49,7 +61,7 @@ func TestList_Success(t *testing.T) {
 
 func TestList_DefaultPaymentMethods(t *testing.T) {
 	svc := &fakeGatewayService{configs: []*ports.GatewayConfig{}}
-	h := NewGatewayHandler(svc)
+	h := NewGatewayHandler(svc, &fakeFeeEstimator{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateways", nil)
 	rec := httptest.NewRecorder()
@@ -64,7 +76,7 @@ func TestList_DefaultPaymentMethods(t *testing.T) {
 
 func TestList_CustomPaymentMethods(t *testing.T) {
 	svc := &fakeGatewayService{configs: []*ports.GatewayConfig{}}
-	h := NewGatewayHandler(svc)
+	h := NewGatewayHandler(svc, &fakeFeeEstimator{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateways?payment_method=card,upi", nil)
 	rec := httptest.NewRecorder()
@@ -79,7 +91,7 @@ func TestList_CustomPaymentMethods(t *testing.T) {
 
 func TestList_ServiceError(t *testing.T) {
 	svc := &fakeGatewayService{err: context.DeadlineExceeded}
-	h := NewGatewayHandler(svc)
+	h := NewGatewayHandler(svc, &fakeFeeEstimator{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateways", nil)
 	rec := httptest.NewRecorder()
@@ -97,7 +109,7 @@ func TestList_SliceSafety(t *testing.T) {
 	svc := &fakeGatewayService{configs: []*ports.GatewayConfig{
 		{GatewayID: "stripe", SupportedMethods: origMethods, SupportedCurrencies: origCurrencies},
 	}}
-	h := NewGatewayHandler(svc)
+	h := NewGatewayHandler(svc, &fakeFeeEstimator{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateways", nil)
 	rec := httptest.NewRecorder()

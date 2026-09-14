@@ -95,6 +95,9 @@ func (h *PayHandler) ServeCheckout(w http.ResponseWriter, r *http.Request) {
 		"redirectUrl":   txn.RedirectURL,
 		"token":         r.URL.Query().Get("token"),
 	}
+	if txn.FeeBreakdown != nil {
+		pageData["fee_breakdown"] = txn.FeeBreakdown
+	}
 	if h.gatewayMetaReader != nil {
 		if meta, err := h.gatewayMetaReader.GetGatewayMetadata(r.Context(), txn.ID); err == nil && meta != nil {
 			pageData["rawMetadata"] = meta

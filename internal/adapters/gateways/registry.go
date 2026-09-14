@@ -10,16 +10,26 @@ import (
 type Registry struct {
 	mu       sync.RWMutex
 	adapters map[string]ports.GatewayAdapter
+	fetchers map[string]ports.SettlementReportFetcher
 }
 
 func NewRegistry() *Registry {
-	return &Registry{adapters: make(map[string]ports.GatewayAdapter)}
+	return &Registry{
+		adapters: make(map[string]ports.GatewayAdapter),
+		fetchers: make(map[string]ports.SettlementReportFetcher),
+	}
 }
 
 func (r *Registry) Register(gatewayID string, adapter ports.GatewayAdapter) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.adapters[gatewayID] = adapter
+}
+
+func (r *Registry) RegisterSettlementFetcher(gatewayID string, fetcher ports.SettlementReportFetcher) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fetchers[gatewayID] = fetcher
 }
 
 func (r *Registry) Get(gatewayID string) (ports.GatewayAdapter, error) {
@@ -30,6 +40,13 @@ func (r *Registry) Get(gatewayID string) (ports.GatewayAdapter, error) {
 		return nil, fmt.Errorf("gateways: no adapter registered for %q", gatewayID)
 	}
 	return adapter, nil
+}
+
+func (r *Registry) SettlementFetcher(gatewayID string) (ports.SettlementReportFetcher, bool) {
+	r.mu.RLock()
+	fetcher, ok := r.fetchers[gatewayID]
+	r.mu.RUnlock()
+	return fetcher, ok
 }
 
 func (r *Registry) WebhookParser(gatewayID string) (ports.GatewayWebhookParser, bool) {

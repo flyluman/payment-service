@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/crownroutes/payment-service/internal/app/idempotency"
+	"github.com/crownroutes/payment-service/internal/domain/fees"
 	"github.com/crownroutes/payment-service/internal/domain/transaction"
 	"github.com/crownroutes/payment-service/internal/ports"
 )
@@ -34,6 +35,7 @@ type ConfigReader interface {
 	GetGatewayConfig(ctx context.Context, gatewayID string) (*ports.GatewayConfig, error)
 	GetProcessingTimeout(ctx context.Context, gatewayID, paymentMethod string) (time.Duration, error)
 	GetFeeModel(ctx context.Context, gatewayID, paymentMethod string) (*ports.GatewayFeeModel, error)
+	GetCurrencyRates(ctx context.Context, tenantID uuid.UUID) ([]fees.CurrencyRate, error)
 }
 type LeaseStore interface {
 	Acquire(ctx context.Context, leaseKey, transactionID uuid.UUID, ttlSec int) (bool, []byte, error)
@@ -161,11 +163,53 @@ func (s *Service) ProcessGatewayInitiate(ctx context.Context, transactionID uuid
 		return fmt.Errorf("gateway-initiate: resolve adapter for %s: %w", txn.GatewayID, err)
 	}
 
+	// Calculate two-layer fees before calling the gateway.
+	gatewayAmount := txn.Amount
+	gatewayCurrency := txn.Currency
+
+	feeModel, _ := s.config.GetFeeModel(ctx, txn.GatewayID, string(txn.PaymentMethod))
+	if feeModel != nil {
+		rates, _ := s.config.GetCurrencyRates(ctx, txn.TenantID)
+		chargesCurrency := feeModel.ChargesCurrency
+		if chargesCurrency == "" {
+			chargesCurrency = txn.Currency
+		}
+
+		// Convert fee_model fixed_fee from BPS to actual amount: fixedFee is in charges currency units.
+		var fixedFee float64
+		if feeModel.FixedFee > 0 {
+			fixedFee = float64(feeModel.FixedFee)
+		}
+
+		// serviceFeeRatio: percentage_bps is in basis points (1 BPS = 0.01%).
+		var ratio float64
+		if feeModel.PercentageBPS > 0 {
+			ratio = float64(feeModel.PercentageBPS) / 100.0
+		}
+
+		breakdown := fees.Calculate(txn.Amount, txn.Currency, chargesCurrency, fixedFee, ratio, rates)
+		if err := fees.Validate(breakdown); err != nil {
+			s.log.Warn("payment.fee_calculation_invalid", map[string]any{
+				"transaction_id": txn.ID.String(),
+				"error":          err.Error(),
+			})
+		} else {
+			txn.FeeBreakdown = breakdown
+			if breakdown.Gateway != nil {
+				gatewayAmount = breakdown.Gateway.Amount
+				gatewayCurrency = breakdown.Gateway.Currency
+				gwAmt := breakdown.Gateway.Amount
+				txn.GatewayAmount = &gwAmt
+				txn.GatewayCurrency = breakdown.Gateway.Currency
+			}
+		}
+	}
+
 	resp, err := adapter.InitiatePayment(ctx, ports.GatewayPaymentRequest{
 		TransactionID: txn.ID,
 		TenantID:      txn.TenantID,
-		Amount:        txn.Amount,
-		Currency:      txn.Currency,
+		Amount:        gatewayAmount,
+		Currency:      gatewayCurrency,
 		PaymentMethod: txn.PaymentMethod,
 		Metadata:      txn.Metadata,
 		CustomerEmail: txn.CustomerEmail,

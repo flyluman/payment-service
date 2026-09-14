@@ -52,6 +52,7 @@ type createPaymentResponse struct {
 	TransactionID string `json:"transaction_id"`
 	Token         string `json:"token"`
 	Status        string `json:"status"`
+	FeeBreakdown  any    `json:"fee_breakdown,omitempty"`
 }
 
 type paymentResponse struct {
@@ -66,6 +67,9 @@ type paymentResponse struct {
 	Description        string         `json:"description,omitempty"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
 	GatewayMetadata    map[string]any `json:"gateway_metadata,omitempty"`
+	GatewayAmount      *int64         `json:"gateway_amount,omitempty"`
+	GatewayCurrency    string         `json:"gateway_currency,omitempty"`
+	FeeBreakdown       any            `json:"fee_breakdown,omitempty"`
 	CreatedAt          string         `json:"created_at"`
 }
 
@@ -167,12 +171,14 @@ func (h *PaymentHandler) Create(w http.ResponseWriter, r *http.Request) {
 			TransactionID: result.Transaction.ID.String(),
 			Token:         result.Token,
 			Status:        string(result.Transaction.Status),
+			FeeBreakdown:  result.Transaction.FeeBreakdown,
 		})
 	case idempotency.Replayed:
 		writeJSON(w, r, http.StatusOK, createPaymentResponse{
 			TransactionID: result.Transaction.ID.String(),
 			Token:         result.Token,
 			Status:        string(result.Transaction.Status),
+			FeeBreakdown:  result.Transaction.FeeBreakdown,
 		})
 	case idempotency.InProgress:
 		writeError(w, r, http.StatusConflict, "idempotency_in_progress", "a request with this idempotency key is already in progress")
@@ -229,10 +235,15 @@ func toPaymentResponse(t *transaction.Txn) paymentResponse {
 		CustomerEmail:      t.CustomerEmail,
 		Description:        t.Description,
 		Metadata:           t.Metadata,
+		GatewayAmount:      t.GatewayAmount,
+		GatewayCurrency:    t.GatewayCurrency,
 		CreatedAt:          t.CreatedAt.Format(time.RFC3339Nano),
 	}
 	if t.CustomerID != uuid.Nil {
 		resp.CustomerID = t.CustomerID.String()
+	}
+	if t.FeeBreakdown != nil {
+		resp.FeeBreakdown = t.FeeBreakdown
 	}
 	return resp
 }

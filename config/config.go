@@ -125,6 +125,7 @@ type JobsConfig struct {
 	PartitionWeeksAhead             int `mapstructure:"partition_weeks_ahead"`
 	PartitionRetentionWeeks         int `mapstructure:"partition_retention_weeks"`
 	PartitionDropAfterDays          int `mapstructure:"partition_drop_after_days"`
+	ReconciliationIntervalSec       int `mapstructure:"reconciliation_interval_sec"`
 }
 
 type Config struct {
@@ -226,6 +227,7 @@ func LoadConfig() (*Config, error) {
 		"jobs.partition_weeks_ahead":       "PARTITION_WEEKS_AHEAD",
 		"jobs.partition_retention_weeks":   "PARTITION_RETENTION_WEEKS",
 		"jobs.partition_drop_after_days":   "PARTITION_DROP_AFTER_DAYS",
+		"jobs.reconciliation_interval_sec": "RECONCILIATION_INTERVAL_SECONDS",
 		"startup.connect_max_attempts":     "STARTUP_CONNECT_MAX_ATTEMPTS",
 		"startup.connect_attempt_timeout_sec": "STARTUP_CONNECT_ATTEMPT_TIMEOUT",
 		"startup.connect_backoff_sec":      "STARTUP_CONNECT_BACKOFF",
